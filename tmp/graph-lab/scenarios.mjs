@@ -1,0 +1,492 @@
+import { cast, postCommit, postReply, viewports } from './lib/app.mjs';
+import { checkEntrance, checkFrames, drawnLines } from './lib/lab.mjs';
+import { withSsr } from './lib/ssr.mjs';
+
+const railPiecesPattern = /data-test="(rail-tail|rail-previous|commit-reply-spine|thread-spine|thread-elbow|reply-link|reply-tail)"/g;
+
+/** What the server sent: cards, rail pieces, and canvas lines (none expected before the browser measures). */
+const serverMarkup = (html) => {
+    const canvas = html.match(/<svg[^>]*data-test="graph-canvas"[\s\S]*?<\/svg>/)?.[0] ?? '';
+    return {
+        cards: (html.match(/data-test="commit"/g) ?? []).length,
+        pieces: (html.match(railPiecesPattern) ?? []).length,
+        canvases: (html.match(/data-test="graph-canvas"/g) ?? []).length,
+        lines: (canvas.match(/<path/g) ?? []).length,
+    };
+};
+
+const unique = (label) => `glab ${label} ${Date.now()}`;
+
+const pagesOf = (fixture) => [
+    { name: 'following', path: '/log/following' },
+    { name: 'latest', path: '/log/latest' },
+    { name: 'trending', path: '/log/trending' },
+    { name: 'profile', path: `/@${cast.author}` },
+    { name: 'profile-replies', path: `/@${cast.author}?tab=replies` },
+    { name: 'thread-root', path: `/@${cast.author}/commits/${fixture.root}`, expand: true },
+    { name: 'thread-continuation', path: `/@${cast.author}/commits/${fixture.self1}`, expand: true },
+    { name: 'thread-nested', path: `/@${cast.peer}/commits/${fixture.peer1}`, expand: true },
+    { name: 'notifications', path: '/notifications' },
+];
+
+export const scenarios = [
+    {
+        name: 'static',
+        title: 'Every page draws a clean graph, on desktop, mobile and dark',
+        async run(lab) {
+            for (const [variant, options] of [
+                ['desktop', { viewport: viewports.desktop }],
+                ['mobile', { viewport: viewports.mobile }],
+                ['dark', { viewport: viewports.desktop, colorScheme: 'dark' }],
+            ]) {
+                const context = await lab.as(cast.author, options);
+                const page = await context.newPage();
+                for (const { name, path, expand } of pagesOf(lab.fixture)) {
+                    await page.goto(path);
+                    await lab.settle(page);
+                    if (expand) await lab.expandReplies(page);
+                    await lab.audit(page, `${name} (${variant})`, { requireDrawn: name !== 'notifications' });
+                }
+            }
+        },
+    },
+    {
+        name: 'ssr',
+        title: 'Server rendering: the rail comes from the server, and the client and canvas take over without a gap',
+        async run(lab, { log }) {
+            const pages = [
+                { name: 'following', path: '/log/following' },
+                { name: 'thread-root', path: `/@${cast.author}/commits/${lab.fixture.root}` },
+                { name: 'profile', path: `/@${cast.author}` },
+            ];
+            await withSsr(log, async () => {
+                const reader = await lab.as(cast.author);
+                const quiet = await lab.as(cast.author, { javaScriptEnabled: false });
+                const quietPage = await quiet.newPage();
+
+                for (const { name, path } of pages) {
+                    const markup = serverMarkup(await (await reader.request.get(path)).text());
+                    lab.check(
+                        `${name}: the server renders ${markup.cards} cards with their rail (${markup.pieces} pieces) and an empty canvas`,
+                        markup.cards > 0 && markup.pieces > 0 && markup.canvases > 0 && markup.lines === 0,
+                        JSON.stringify(markup),
+                    );
+
+                    await quietPage.goto(path);
+                    const shown = await quietPage.evaluate(
+                        (selector) => [...document.querySelectorAll(selector)].filter((element) => element.offsetWidth || element.offsetHeight).length,
+                        '[data-test="rail-tail"], [data-test="rail-previous"], [data-test="commit-reply-spine"]',
+                    );
+                    lab.check(`${name}: without JavaScript, ${shown} rail pieces show`, shown > 0);
+                    await lab.shot(quietPage, `${name} server only`);
+
+                    const context = await lab.as(cast.author);
+                    await context.addInitScript(() => window.__glab.startHandoff());
+                    const page = await context.newPage();
+                    await page.goto(path);
+                    await lab.settle(page, 1500);
+                    const frames = (await page.evaluate(() => window.__glabHandoff ?? [])).filter((frame) => frame.cards > 0);
+                    const first = frames[0];
+                    const last = frames.at(-1);
+                    const blank = frames.filter((frame) => frame.pieces === 0 && frame.lines === 0);
+                    const both = frames.filter((frame) => frame.pieces > 0 && frame.lines > 0);
+                    const at = (list) => list.slice(0, 4).map((frame) => `at ${frame.t}ms: ${frame.pieces} pieces, ${frame.lines} lines`);
+                    lab.check(`${name}: the first painted frame shows the server's rail`, first?.pieces > 0, first ? at([first]) : 'no frame with cards');
+                    lab.check(`${name}: no frame shows the cards without any graph`, blank.length === 0, at(blank));
+                    lab.check(`${name}: no frame shows the rail and the canvas lines together`, both.length === 0, at(both));
+                    lab.check(`${name}: the canvas has taken over`, last?.lines > 0 && last?.pieces === 0, last ? at([last]) : []);
+                    if (await page.evaluate(() => window.__glabServerCardsReplaced > 0)) {
+                        lab.skip(`${name}: hydration without mismatch`, "the client re-renders the page instead of hydrating it (createRoot in app.tsx), so there's no hydration to check");
+                    } else {
+                        const mismatches = lab.consoleProblems().filter((message) => /hydrat|#418|#423|#425|did not match/i.test(message.text));
+                        lab.check(`${name}: hydration without mismatch`, mismatches.length === 0, mismatches.map((message) => message.text.slice(0, 200)));
+                    }
+                    if (name === 'thread-root') await lab.expandReplies(page);
+                    await lab.audit(page, `${name} in the browser`);
+                }
+            });
+        },
+    },
+    {
+        name: 'reduced',
+        title: 'With reduced motion, nothing animates and everything shows in its final state',
+        async run(lab) {
+            const options = { reducedMotion: 'reduce' };
+            const context = await lab.as(cast.calm, options);
+            const page = await context.newPage();
+            await page.goto('/log/following');
+            await lab.settle(page);
+            const body = unique('calm');
+            const frames = await lab.record(
+                page,
+                async () => {
+                    await page.locator('textarea').first().click();
+                    await page.keyboard.type(body);
+                    await page.keyboard.press('Meta+Enter');
+                },
+                { watch: body, duration: 2500, film: 'posting with reduced motion' },
+            );
+            checkFrames(lab, 'posting with reduced motion', frames, { allowNodeIn: false });
+            const midDraw = frames.filter((frame) => frame.draws.some((draw) => draw.hidden > 0.01));
+            lab.check('posting with reduced motion: no line draws itself in, each shows whole', midDraw.length === 0, midDraw.slice(0, 4).map((frame) => `at ${frame.t}ms`));
+            const shown = frames.filter((frame) => frame.avatar !== undefined && frame.avatar !== null);
+            const scaled = shown.filter((frame) => Math.abs(frame.avatar - 1) > 0.01 || (frame.dot !== null && Math.abs(frame.dot - 1) > 0.01));
+            lab.check(
+                `posting with reduced motion: the new avatar and end dot show at full size from the start (${shown.length} frames)`,
+                shown.length > 0 && scaled.length === 0,
+                scaled.slice(0, 4).map((frame) => `at ${frame.t}ms: avatar ${frame.avatar}, dot ${frame.dot}`),
+            );
+            await lab.audit(page, 'after posting with reduced motion');
+
+            await page.goto(`/@${cast.author}/commits/${lab.fixture.root}`);
+            await lab.settle(page);
+            const toggle = page.locator('[data-test="toggle-replies-button"][aria-expanded="false"]').first();
+            if ((await toggle.count()) > 0) {
+                const opening = await lab.record(page, () => toggle.click(), { duration: 1500, film: 'opening replies with reduced motion' });
+                checkFrames(lab, 'opening replies with reduced motion', opening, { allowNodeIn: false });
+                const drawing = opening.filter((frame) => frame.draws.some((draw) => draw.hidden > 0.01));
+                lab.check('opening replies with reduced motion: no line draws itself in', drawing.length === 0, drawing.slice(0, 4).map((frame) => `at ${frame.t}ms`));
+                await lab.audit(page, 'replies opened with reduced motion');
+            }
+        },
+    },
+    {
+        name: 'expand',
+        title: 'Opening replies draws only the new lines, in place',
+        async run(lab) {
+            const page = await lab.open(cast.author, `/@${cast.author}/commits/${lab.fixture.root}`);
+            const toggle = page.locator('[data-test="toggle-replies-button"][aria-expanded="false"]').first();
+            if (!lab.check('a collapsed thread to open', (await toggle.count()) > 0)) return;
+            const before = await lab.edgeCount(page);
+            const frames = await lab.record(page, () => toggle.click(), { film: 'opening replies' });
+            const added = (await lab.edgeCount(page)) - before;
+            checkFrames(lab, 'opening replies', frames);
+            lab.check(`opening replies: the ${added} new line(s) draw in`, added > 0 && drawnLines(frames) >= 1, `${drawnLines(frames)} drawn for ${added} added`);
+            await lab.audit(page, 'replies opened');
+        },
+    },
+    {
+        name: 'more',
+        title: 'Loading more replies draws only the new lines, in place',
+        async run(lab) {
+            const page = await lab.open(cast.author, `/@${cast.author}/commits/${lab.fixture.root}`);
+            await lab.expandReplies(page);
+            const more = page.locator('[data-test="more-replies-button"]').first();
+            if (!lab.check('a "more replies" button', (await more.count()) > 0)) return;
+            const before = await lab.edgeCount(page);
+            const frames = await lab.record(page, () => more.click(), { film: 'loading more' });
+            const added = (await lab.edgeCount(page)) - before;
+            checkFrames(lab, 'loading more', frames);
+            lab.check(`loading more: the new line(s) draw in`, drawnLines(frames) >= 1, `${drawnLines(frames)} drawn, ${added} added`);
+            await lab.audit(page, 'more replies loaded');
+        },
+    },
+    {
+        name: 'post',
+        title: 'Posting: avatar, then line, then dot; nothing else moves',
+        async run(lab) {
+            const page = await lab.open(cast.poster, '/log/following');
+            const body = unique('post');
+            const before = await lab.edgeCount(page);
+            const frames = await lab.record(
+                page,
+                async () => {
+                    await page.locator('textarea').first().click();
+                    await page.keyboard.type(body);
+                    await page.keyboard.press('Meta+Enter');
+                },
+                { watch: body, duration: 3500, film: 'posting' },
+            );
+            const added = (await lab.edgeCount(page)) - before;
+            checkFrames(lab, 'posting', frames);
+            checkEntrance(lab, 'posting', frames);
+            // The feed's first page keeps its size, so the line count can stay the same as an older card drops off.
+            lab.check(`posting: only the new card's line draws in`, drawnLines(frames) === 1, `${drawnLines(frames)} drawn, ${added} added`);
+            await lab.audit(page, 'after posting');
+        },
+    },
+    {
+        name: 'reorder',
+        title: 'Posting to a ranked feed reorders cards without stale lines',
+        async run(lab) {
+            const page = await lab.open(cast.ranker, '/log/trending');
+            const frames = await lab.record(
+                page,
+                async () => {
+                    await page.locator('textarea').first().click();
+                    await page.keyboard.type(unique('reorder'));
+                    await page.keyboard.press('Meta+Enter');
+                },
+                { duration: 3000, film: 'reordering' },
+            );
+            checkFrames(lab, 'reordering', frames);
+            await lab.audit(page, 'after reordering');
+        },
+    },
+    {
+        name: 'scroll',
+        title: 'Scrolling loads more cards: their lines show drawn, nothing draws off screen, no mask stays',
+        async run(lab) {
+            const page = await lab.open(cast.author, '/log/latest');
+            const before = await lab.edgeCount(page);
+            const frames = await lab.record(
+                page,
+                async () => {
+                    // Slow enough for the server's rate limit on loading pages.
+                    for (let step = 0; step < 8; step++) {
+                        await page.mouse.wheel(0, 1200);
+                        await page.waitForTimeout(700);
+                    }
+                },
+                { duration: 2500, film: 'scrolling' },
+            );
+            const after = await lab.edgeCount(page);
+            lab.check(`scrolling loads more cards (${before} → ${after} lines)`, after > before);
+            checkFrames(lab, 'scrolling', frames);
+            // Back at the top, where the full-page screenshot draws the sticky header in place rather than over cards.
+            await page.evaluate(() => window.scrollTo(0, 0));
+            await page.waitForTimeout(300);
+            await lab.audit(page, 'after scrolling');
+        },
+    },
+    {
+        name: 'quote',
+        title: 'A quote listed under the commit it quotes, and as a card of its own, in the same feed',
+        async run(lab) {
+            const quoted = await lab.as(cast.quoted);
+            const body = unique('quoted');
+            const root = await postCommit(quoted, cast.quoted, body);
+            const quoter = await lab.as(cast.quoter);
+            await postCommit(quoter, cast.quoter, unique('quoting'), { quote: root });
+            const page = await lab.open(cast.author, '/log/latest');
+            // The quoting card holds the quoted body too, in its embed: the quoted card is the one listing replies.
+            const listed = await page
+                .locator('[data-test="commit"]', { hasText: body })
+                .locator('[data-test="reply"]', { hasText: cast.quoter })
+                .count();
+            lab.check('the quote shows under the commit it quotes', listed > 0);
+            await lab.audit(page, 'quote and quoted commit in one feed');
+        },
+    },
+    {
+        name: 'swap',
+        title: 'Cards trading places without any resize: lines follow in the same frame',
+        async run(lab) {
+            const page = await lab.open(cast.author, '/log/latest');
+            const swapped = await page.evaluate(() => {
+                const cards = [...document.querySelectorAll('[data-test="graph-canvas"]')[0].parentElement.querySelectorAll('[data-test="commit"]')];
+                for (let i = 0; i < cards.length - 1; i++) {
+                    for (let j = i + 1; j < cards.length; j++) {
+                        const [a, b] = [cards[i], cards[j]];
+                        const lane = (card) => card.querySelector('[style*="--lane"]')?.style.getPropertyValue('--lane');
+                        if (a.offsetHeight === b.offsetHeight && lane(a) !== lane(b) && a.parentElement === b.parentElement && b.previousElementSibling !== a) {
+                            window.__glabSwap = () => {
+                                const marker = document.createComment('glab');
+                                a.replaceWith(marker);
+                                b.replaceWith(a);
+                                marker.replaceWith(b);
+                            };
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            });
+            if (!lab.check('two cards of the same height, in different lanes, to swap', swapped)) return;
+            const frames = await lab.record(page, () => page.evaluate(() => window.__glabSwap()), { duration: 600, film: 'swapping cards' });
+            checkFrames(lab, 'swapping cards', frames);
+            await lab.audit(page, 'after swapping');
+        },
+    },
+    {
+        name: 'arrival',
+        title: 'A commit from someone else arriving through the "new commits" button',
+        slow: true,
+        async run(lab) {
+            const page = await lab.open(cast.author, '/log/following');
+            const peer = await lab.as(cast.peer);
+            await postCommit(peer, cast.peer, unique('arrival'));
+            const button = page.getByRole('button', { name: /new commits?$/ });
+            const appeared = await button.waitFor({ timeout: 40_000 }).then(() => true, () => false);
+            if (!lab.check('the "new commits" button shows up within 40s', appeared)) return;
+            const before = await lab.edgeCount(page);
+            const frames = await lab.record(page, () => button.click(), { duration: 3000, film: 'arrival' });
+            const added = (await lab.edgeCount(page)) - before;
+            checkFrames(lab, 'arrival', frames);
+            lab.check(`arrival: the new card's line draws in`, drawnLines(frames) >= 1, `${drawnLines(frames)} drawn, ${added} added`);
+            await lab.audit(page, 'after arrival');
+        },
+    },
+    {
+        name: 'thread-open',
+        title: 'Opening a thread right after posting it: nothing pops again',
+        async run(lab) {
+            const context = await lab.as(cast.threader);
+            const body = unique('thread');
+            const root = await postCommit(context, cast.threader, body);
+            await postReply(context, cast.threader, root, `${body} reply`);
+            const page = await context.newPage();
+            await page.goto('/log/following');
+            await page.waitForLoadState('networkidle');
+            const link = page.locator('[data-test="commit"]', { hasText: body }).locator('[data-test="show-thread-link"]').first();
+            if (!lab.check('a "Show thread" link on the new thread', await link.isVisible().catch(() => false))) return;
+            const frames = await lab.record(page, () => link.click(), { duration: 2500, film: 'opening the thread' });
+            checkFrames(lab, 'opening the thread', frames, { allowNodeIn: false });
+            lab.check('opening the thread: no line draws in', drawnLines(frames) === 0, `${drawnLines(frames)} drawn`);
+            await lab.audit(page, 'thread opened');
+        },
+    },
+    {
+        name: 'chain',
+        title: 'Replying to oneself on the thread page',
+        async run(lab) {
+            const context = await lab.as(cast.chainer);
+            const body = unique('chain');
+            const root = await postCommit(context, cast.chainer, body);
+            await postReply(context, cast.chainer, root, `${body} 1`);
+            // Each post dispatches the unique CheckUserLevel job inside its transaction: posting again before the queue
+            // has run it trips over its lock (a 500 on the cache store in the database).
+            await new Promise((resolve) => setTimeout(resolve, 3000));
+            const page = await context.newPage();
+            await page.goto(`/@${cast.chainer}/commits/${root}`);
+            await lab.settle(page);
+            await page.locator('[data-test="commit"]').last().getByRole('button', { name: /^Reply/ }).first().click();
+            await page.waitForTimeout(300);
+            const frames = await lab.record(
+                page,
+                async () => {
+                    await page.locator('textarea').last().click();
+                    await page.keyboard.type(`${body} 2`);
+                    await page.keyboard.press('Meta+Enter');
+                },
+                { duration: 3500, film: 'chained reply' },
+            );
+            checkFrames(lab, 'chained reply', frames);
+            await lab.audit(page, 'after the chained reply');
+        },
+    },
+    {
+        name: 'hover',
+        title: 'Hovering an author dims the other lanes, lines with their nodes',
+        async run(lab) {
+            for (const path of ['/log/following', `/@${cast.author}/commits/${lab.fixture.root}`]) {
+                const page = await lab.open(cast.author, path);
+                await lab.expandReplies(page);
+                // A rail or reply avatar, not a mention of the same account in a commit's body.
+                const avatar = page
+                    .locator(
+                        ['[aria-hidden] a', '[data-test="reply"] a.rounded-full']
+                            .flatMap((target) => ['glab-peer', 'glab-pal'].map((user) => `[data-test="commit"] ${target}[href^="/@${user}"]`))
+                            .join(', '),
+                    )
+                    .first();
+                if (!lab.check(`${path}: a card or reply by someone else to hover`, (await avatar.count()) > 0)) continue;
+                // The feed ignores hovers while it scrolls, so bring the avatar on screen first.
+                await avatar.scrollIntoViewIfNeeded();
+                await page.waitForTimeout(500);
+                const observedBefore = await page.evaluate(() => ({ ...window.__glabObserved }));
+                await avatar.hover();
+                await page.waitForTimeout(500);
+                const { mismatches, dimmedNodes, checked } = await page.evaluate(() => window.__glab.dimming());
+                lab.check(`${path}: hovering dims ${dimmedNodes} node(s) and their ${checked} checked lines match`, mismatches.length === 0 && (dimmedNodes > 0 || path.includes('/commits/')), mismatches);
+                await lab.shot(page, `hover ${path}`, { fullPage: false });
+                await page.mouse.move(5, 5);
+                await page.waitForTimeout(500);
+                const after = await page.evaluate(() => window.__glab.dimming());
+                lab.check(`${path}: leaving brings every line back`, after.mismatches.length === 0 && after.dimmedNodes === 0, after.mismatches);
+                const observedAfter = await page.evaluate(() => ({ ...window.__glabObserved }));
+                const reobserved = observedAfter.observe - observedBefore.observe + observedAfter.unobserve - observedBefore.unobserve;
+                lab.check(`${path}: hovering and leaving register no node again`, reobserved === 0, `${observedAfter.observe - observedBefore.observe} observe, ${observedAfter.unobserve - observedBefore.unobserve} unobserve`);
+            }
+        },
+    },
+    {
+        name: 'resize',
+        title: 'Resizing keeps every line on its nodes',
+        async run(lab) {
+            const page = await lab.open(cast.author, `/@${cast.author}/commits/${lab.fixture.root}`);
+            await lab.expandReplies(page);
+            const frames = await lab.record(
+                page,
+                async () => {
+                    for (const width of [390, 820, 1280, 600]) {
+                        await page.setViewportSize({ width, height: 1000 });
+                        await page.waitForTimeout(250);
+                    }
+                },
+                { duration: 500, film: 'resizing', crop: false },
+            );
+            checkFrames(lab, 'resizing', frames);
+            await lab.audit(page, 'after resizing');
+        },
+    },
+    {
+        name: 'navigate',
+        title: 'Navigating between pages: every new page draws cleanly and nothing is logged',
+        async run(lab) {
+            const page = await lab.open(cast.author, '/log/following');
+            const steps = [
+                ['an avatar to a profile', () => page.locator('[data-test="commit"] a[href^="/@glab-peer"]').first().click()],
+                ['back to the feed', () => page.goBack()],
+                ['a permalink to a thread', () => page.locator('[data-test="commit-permalink"]').nth(1).click()],
+                ['back to the feed', () => page.goBack()],
+                ['a tab', () => page.locator('a[href="/log/latest"]').first().click()],
+                ['the notifications', () => page.locator('a[href="/notifications"]').first().click()],
+                ['forward and back', async () => {
+                    await page.goBack();
+                    await page.goForward();
+                }],
+            ];
+            for (const [label, step] of steps) {
+                const consoleBefore = lab.consoleProblems().length;
+                await step();
+                await lab.settle(page, 700);
+                const raised = lab.consoleProblems().slice(consoleBefore);
+                lab.check(`following ${label} logs nothing`, raised.length === 0, raised.map((message) => message.text.slice(0, 200)));
+                await lab.audit(page, `after following ${label}`, { screenshot: false, requireDrawn: false });
+            }
+        },
+    },
+    {
+        name: 'hunt',
+        title: 'Random navigation: the graph never goes stale or vanishes',
+        async run(lab, { steps = 25 } = {}) {
+            const page = await lab.open(cast.author, '/log/following');
+            const moves = {
+                tab: () => page.locator('a[href^="/log/"]').nth(Math.floor(Math.random() * 3)).click({ timeout: 3000 }),
+                commit: () => page.locator('[data-test="commit-permalink"]').nth(Math.floor(Math.random() * 4)).click({ timeout: 3000 }),
+                profile: () => page.goto(`/@${[cast.author, cast.peer, cast.pal][Math.floor(Math.random() * 3)]}`),
+                avatar: () => page.locator('[data-test="commit"] a[href^="/@"]').nth(Math.floor(Math.random() * 4)).click({ timeout: 3000 }),
+                notifications: () => page.goto('/notifications'),
+                back: () => page.goBack(),
+                forward: () => page.goForward(),
+                scroll: () => page.mouse.wheel(0, 2500),
+                top: () => page.evaluate(() => window.scrollTo(0, 0)),
+                expand: () => lab.expandReplies(page),
+                resize: () => page.setViewportSize([viewports.mobile, viewports.desktop][Math.floor(Math.random() * 2)]),
+            };
+            const names = Object.keys(moves);
+            const trail = [];
+            let clean = 0;
+            for (let step = 0; step < steps; step++) {
+                const name = names[Math.floor(Math.random() * names.length)];
+                trail.push(name);
+                const consoleBefore = lab.consoleProblems().length;
+                await moves[name]().catch(() => {});
+                await lab.settle(page, 600);
+                const raised = lab.consoleProblems().slice(consoleBefore);
+                if (raised.length > 0) {
+                    lab.check(`step ${step + 1} (${name}) on ${new URL(page.url()).pathname} logs nothing`, false, raised.map((message) => message.text.slice(0, 200)));
+                }
+                const { issues } = await page.evaluate(() => window.__glab.audit({ requireDrawn: false }));
+                if (issues.length === 0) {
+                    clean++;
+                    continue;
+                }
+                lab.check(`step ${step + 1} after ${trail.slice(-4).join(' › ')} on ${new URL(page.url()).pathname}`, false, issues);
+                await lab.shot(page, `hunt step ${step + 1}`, { fullPage: false });
+            }
+            lab.check(`${clean} of ${steps} random steps clean (${trail.join(' › ')})`, clean === steps);
+        },
+    },
+];
