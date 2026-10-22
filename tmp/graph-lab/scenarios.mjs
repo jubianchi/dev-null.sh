@@ -1,8 +1,55 @@
 import { cast, deleteCommit, postCommit, postReply, viewports } from './lib/app.mjs';
 import { checkEntrance, checkFrames, drawnLines } from './lib/lab.mjs';
+import { compareRegions } from './lib/pixels.mjs';
 import { withSsr } from './lib/ssr.mjs';
 
-const railPiecesPattern = /data-test="(rail-tail|rail-previous|commit-reply-spine|thread-spine|thread-elbow|reply-link|reply-tail)"/g;
+const railPieceNames = ['rail-tail', 'rail-previous', 'commit-reply-spine', 'thread-spine', 'thread-elbow', 'reply-link', 'reply-tail'];
+const railPiecesPattern = new RegExp(`data-test="(${railPieceNames.join('|')})"`, 'g');
+const railPieces = railPieceNames.map((name) => `[data-test="${name}"]`).join(',');
+
+/**
+ * What the viewport shows of the graph: where the cards sit, and the boxes of the rail pieces or the canvas lines,
+ * padded a little and named after the card around them.
+ */
+const graphBoxes = (page, selector) =>
+    page.evaluate((selector) => {
+        const onScreen = (element) => {
+            const rect = element.getBoundingClientRect();
+            return rect.bottom > 0 && rect.top < window.innerHeight;
+        };
+        const nameOf = (element) => {
+            const card = element.closest('[data-test="reply"], [data-test="commit"]');
+            return card?.querySelector('a[href^="/@"]')?.textContent?.trim() || card?.textContent?.trim().slice(0, 30) || 'page';
+        };
+        const box = (element, kind) => {
+            const rect = element.getBoundingClientRect();
+            return { kind, name: nameOf(element), left: rect.left - 3, right: rect.right + 3, top: rect.top + window.scrollY - 3, bottom: rect.bottom + window.scrollY + 3 };
+        };
+        const canvasLines = [...document.querySelectorAll('[data-test="graph-canvas"] > g path')].filter(onScreen);
+        // The nodes the canvas cuts out of its lines: avatars and dots, which both sides draw alike.
+        const nodes = [...document.querySelectorAll('[data-test="graph-canvas"]')].flatMap((svg) => {
+            const origin = svg.getBoundingClientRect();
+            return [...svg.querySelectorAll('mask[id$="-nodes"] circle')].map((circle) => ({
+                x: origin.left + Number(circle.getAttribute('cx')),
+                y: origin.top + window.scrollY + Number(circle.getAttribute('cy')),
+                r: Number(circle.getAttribute('r')) + 1,
+            }));
+        });
+        return {
+            nodes,
+            layout: [...document.querySelectorAll('[data-test="commit"], [data-test="reply"]')].filter(onScreen).map((card) => Math.round(card.getBoundingClientRect().top)),
+            boxes: [
+                // The elbow is an SVG element, which has no offset size.
+                ...[...document.querySelectorAll(selector)]
+                    .filter((element) => {
+                        const rect = element.getBoundingClientRect();
+                        return (rect.width || rect.height) && onScreen(element);
+                    })
+                    .map((element) => box(element, element.dataset.test)),
+                ...canvasLines.map((path) => box(path, path.dataset.test)),
+            ],
+        };
+    }, selector);
 
 /** What the server sent: cards, rail pieces, and canvas lines (none expected before the browser measures). */
 const serverMarkup = (html) => {
@@ -103,6 +150,67 @@ export const scenarios = [
                     }
                     if (name === 'thread-root') await lab.expandReplies(page);
                     await lab.audit(page, `${name} in the browser`);
+                }
+            });
+        },
+    },
+    {
+        name: 'handover',
+        title: "Server rendering: the canvas takes over from the server's rail without changing how the graph looks",
+        async run(lab, { log }) {
+            const pages = [
+                { name: 'latest', path: '/log/latest' },
+                { name: 'thread-root', path: `/@${cast.author}/commits/${lab.fixture.root}` },
+                { name: 'thread-nested', path: `/@${cast.peer}/commits/${lab.fixture.peer1}` },
+                { name: 'profile', path: `/@${cast.author}` },
+                { name: 'profile-replies', path: `/@${cast.author}?tab=replies` },
+                { name: 'notifications', path: '/notifications' },
+            ];
+            // The hand-over happens on the first screen. Cards off screen keep a placeholder height (content-visibility)
+            // until they near it, so only the viewport is compared, made tall to take in more of the graph.
+            const variants = [
+                { variant: 'desktop', viewport: { ...viewports.desktop, height: 2000 } },
+                { variant: 'mobile', viewport: { ...viewports.mobile, height: 1800 } },
+                { variant: 'dark', viewport: { ...viewports.desktop, height: 2000 }, colorScheme: 'dark' },
+            ];
+            await withSsr(log, async () => {
+                for (const { variant, viewport, colorScheme } of variants) {
+                    for (const { name, path } of pages) {
+                        const label = `${name} (${variant})`;
+                        const context = await lab.as(cast.author, { viewport, colorScheme });
+                        const page = await context.newPage();
+                        // The app's bundles wait while the server's page, rail included, is captured as it first shows.
+                        let release;
+                        const held = new Promise((resolve) => (release = resolve));
+                        await page.route('**/build/assets/*.js', async (route) => {
+                            await held;
+                            await route.continue();
+                        });
+                        // Deferred module scripts hold DOMContentLoaded back too: wait for the server's cards instead.
+                        await page.goto(path, { waitUntil: 'commit' });
+                        await page.waitForSelector(railPieces, { state: 'attached', timeout: 10000 }).catch(() => {});
+                        await page.evaluate(() => document.fonts.ready);
+                        await page.waitForTimeout(300);
+                        const rail = { ...(await graphBoxes(page, railPieces)), buffer: await page.screenshot() };
+                        if (!lab.check(`${label}: the server's page shows its rail before the client runs`, rail.boxes.length > 0, `${rail.boxes.length} rail pieces`)) continue;
+                        await lab.shot(page, `${label} rail`, { fullPage: false });
+                        release();
+                        await page.waitForFunction(() => document.querySelectorAll('[data-test="graph-canvas"] > g path').length > 0, null, { timeout: 10000 }).catch(() => {});
+                        await lab.settle(page, 1500);
+                        const canvas = { ...(await graphBoxes(page, railPieces)), buffer: await page.screenshot() };
+                        await lab.shot(page, `${label} canvas`, { fullPage: false });
+                        // Content the client fills in, like who to follow on a mobile feed, can move the cards below it: the
+                        // graph is compared above the first card that moves.
+                        const moved = rail.layout.findIndex((top, index) => top !== canvas.layout[index]);
+                        const cutoff = moved === -1 ? Infinity : Math.min(rail.layout[moved], canvas.layout[moved] ?? Infinity);
+                        if (moved !== -1) lab.skip(`${label}: the graph below y=${cutoff}`, 'the cards there move when the client fills in deferred content, which the graph has no part in');
+                        const changed = compareRegions(rail.buffer, canvas.buffer, [...rail.boxes, ...canvas.boxes].filter((box) => box.top < cutoff), 2, canvas.nodes);
+                        lab.check(
+                            `${label}: the ${rail.boxes.length} rail pieces and the ${canvas.boxes.length} canvas lines look the same`,
+                            canvas.boxes.length > 0 && changed.length === 0,
+                            changed.slice(0, 6).map((box) => `${box.kind} by ${box.name} at ${Math.round(box.left)},${Math.round(box.top)}: ${box.reasons.join(', ')}`),
+                        );
+                    }
                 }
             });
         },

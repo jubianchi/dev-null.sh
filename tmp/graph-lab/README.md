@@ -72,6 +72,7 @@ Frame by frame during animations (`checkFrames`):
 |---|---|
 | `static` | audits 9 pages (feeds, profile, profile replies, threads, notifications) on desktop, mobile and dark |
 | `ssr` | server rendering: the HTML holds the rail and an empty canvas, the page without JavaScript shows the rail, the first client frame shows the rail, no frame shows neither or both, then the canvas takes over |
+| `handover` | server rendering, as in production: holds the app's bundles back to capture the server's page as it first shows, rail included, then lets the client take over and compares the two screenshots wherever a rail piece or a canvas line sits, on the first screen (made tall), on desktop, mobile and dark. As an eye would: the ink, the line's width, its colour and its dashes' length must stay, like a shoulder the rail drew thinner, while where the dashes start may shift (a line split in pieces can't match one drawn in a single path). Nodes are left out, both sides draw them alike. Cards that move because the client fills in deferred content (who to follow) end the comparison there |
 | `reduced` | reduced motion: nothing animates, every line, avatar and dot shows in its final state right away |
 | `expand` | opens collapsed replies |
 | `more` | loads more replies |
