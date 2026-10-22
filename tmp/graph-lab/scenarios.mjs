@@ -217,15 +217,18 @@ export const scenarios = [
         title: 'Posting to a ranked feed reorders cards without stale lines',
         async run(lab) {
             const page = await lab.open(cast.ranker, '/log/trending');
+            const body = unique('reorder');
             const frames = await lab.record(
                 page,
                 async () => {
                     await page.locator('textarea').first().click();
-                    await page.keyboard.type(unique('reorder'));
+                    await page.keyboard.type(body);
                     await page.keyboard.press('Meta+Enter');
                 },
                 { duration: 3000, film: 'reordering' },
             );
+            // Otherwise nothing reordered, and every check below passes for nothing.
+            lab.check('reordering: the new card shows up', (await page.locator('[data-test="commit"]', { hasText: body }).count()) > 0);
             checkFrames(lab, 'reordering', frames);
             await lab.audit(page, 'after reordering');
         },

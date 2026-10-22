@@ -32,3 +32,11 @@ foreach (explode(',', (string) getenv('GLAB_CAST')) as $username) {
 
     echo "@{$username} ".($user->fresh()->hasGoodReputation() ? 'trusted' : 'NOT trusted').PHP_EOL;
 }
+
+// Threads from earlier runs, with their replies, rank above a fresh commit in Trending: they would push the commit the
+// `reorder` scenario posts off the first page. They sink as if they were days old.
+Commit::query()
+    ->whereNull('parent_id')
+    ->whereIn('user_id', User::query()->where('username', 'like', 'glab-%')->select('id'))
+    ->where('hot_score', '>', 0)
+    ->update(['hot_score' => 0]);
