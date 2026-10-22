@@ -88,7 +88,14 @@ export function createLab({ browser, base, fixture, outDir, scenario, filming = 
          * then, on the screenshot, whether each line is actually painted.
          */
         async audit(page, label, { screenshot = true, requireDrawn = true } = {}) {
-            const { issues, stats } = await page.evaluate((options) => window.__glab.audit(options), { requireDrawn });
+            let { issues, stats } = await page.evaluate((options) => window.__glab.audit(options), { requireDrawn });
+            // A line that has just drawn drops its mask on the next render: only a mask still there a moment later is stuck.
+            const isMaskKept = (issue) => issue.includes('keeps its draw mask');
+            if (issues.some(isMaskKept)) {
+                await page.waitForTimeout(250);
+                const again = await page.evaluate((options) => window.__glab.audit(options), { requireDrawn });
+                issues = [...issues.filter((issue) => !isMaskKept(issue)), ...again.issues.filter(isMaskKept)];
+            }
             lab.check(`${label}: ${stats.nodes} nodes, ${stats.edges} lines drawn cleanly`, issues.length === 0, issues);
             if (!screenshot) return stats;
 
