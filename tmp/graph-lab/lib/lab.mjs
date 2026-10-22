@@ -180,6 +180,8 @@ export function checkFrames(lab, label, frames, { allowNodeIn = true } = {}) {
     );
     const redrawn = [...new Set(frames.flatMap((frame) => frame.redrawn))];
     lab.check(`${label}: no line already there draws itself in again`, redrawn.length === 0, redrawn.slice(0, 4));
+    const repainted = [...new Set(frames.flatMap((frame) => frame.repainted))];
+    lab.check(`${label}: no stretch of line already painted hides to draw itself in again`, repainted.length === 0, repainted.slice(0, 4));
     lab.check(
         `${label}: no line shows over a node while it scales in`,
         frames.every((frame) => frame.lineOverScalingNode === 0),

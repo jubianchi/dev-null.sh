@@ -173,12 +173,19 @@ export const scenarios = [
             await lab.expandReplies(page);
             const more = page.locator('[data-test="more-replies-button"]').first();
             if (!lab.check('a "more replies" button', (await more.count()) > 0)) return;
-            const before = await lab.edgeCount(page);
-            const frames = await lab.record(page, () => more.click(), { film: 'loading more' });
-            const added = (await lab.edgeCount(page)) - before;
-            checkFrames(lab, 'loading more', frames);
-            lab.check(`loading more: the new line(s) draw in`, drawnLines(frames) >= 1, `${drawnLines(frames)} drawn, ${added} added`);
-            await lab.audit(page, 'more replies loaded');
+            // Down to the last page, where the "more replies" dot gives way to the replies and its line to theirs.
+            const labels = [];
+            for (let round = 0; round < 4 && (await more.count()) > 0; round++) {
+                const label = `loading more ("${(await more.innerText()).trim()}")`;
+                labels.push(label);
+                const before = await lab.edgeCount(page);
+                const frames = await lab.record(page, () => more.click(), { film: label });
+                const added = (await lab.edgeCount(page)) - before;
+                checkFrames(lab, label, frames);
+                lab.check(`${label}: the new line(s) draw in`, drawnLines(frames) >= 1, `${drawnLines(frames)} drawn, ${added} added`);
+                await lab.audit(page, `${label}: replies loaded`);
+            }
+            lab.check('every reply loaded, down to the last page', (await more.count()) === 0 && labels.some((label) => label.includes('the last')), labels);
         },
     },
     {

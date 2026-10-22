@@ -171,6 +171,42 @@ export function installProbe() {
     };
     const nodesWithCentres = (container, box) => expectedNodes(container).map(({ element }) => ({ element, centre: centreOf(element, box) }));
 
+    // Points along a stretch of a line (fractions of its length), every 2px, in the canvas's coordinates.
+    const pointsAlong = (path, from = 0, to = 1) => {
+        const length = path.getTotalLength();
+        const points = [];
+        for (let at = from * length; at <= to * length; at += 2) {
+            const { x, y } = path.getPointAtLength(at);
+            points.push({ x, y });
+        }
+        return points;
+    };
+
+    // What each node's lines painted before an action, by the node they leave and where it stood.
+    const paintedLines = (edges, nodes) => {
+        const painted = new Map();
+        for (const { path } of edges) {
+            const start = path.getPointAtLength(0);
+            const node = nodes.find(({ centre }) => Math.hypot(centre.x - start.x, centre.y - start.y) < 1.5);
+            if (!node) continue;
+            const key = nodeKey(node.element);
+            painted.set(key, [...(painted.get(key) ?? []), { start, points: pointsAlong(path) }]);
+        }
+        return painted;
+    };
+
+    // How many px of a line drawing itself in are hidden where a line from the same node, which hasn't moved, was painted.
+    const repaintedLength = (path, hidden, nodes, painted) => {
+        const start = path.getPointAtLength(0);
+        const node = nodes.find(({ centre }) => Math.hypot(centre.x - start.x, centre.y - start.y) < 1.5);
+        const before = node ? (painted.get(nodeKey(node.element)) ?? []).filter((line) => Math.hypot(line.start.x - start.x, line.start.y - start.y) < 1) : [];
+        if (before.length === 0) return 0;
+        const covered = pointsAlong(path, 1 - hidden, 1).filter((point) =>
+            before.some((line) => line.points.some((old) => Math.hypot(old.x - point.x, old.y - point.y) < 1)),
+        );
+        return covered.length * 2;
+    };
+
     function readCanvas(svg) {
         const container = svg.parentElement;
         const box = container.getBoundingClientRect();
@@ -331,10 +367,14 @@ export function installProbe() {
     function startRecording({ watch = null } = {}) {
         const frames = [];
         const baseline = new Set();
+        const painted = new Map();
+        // Lines that had a node scaling in at one end during the recording.
+        const scaledIn = new Set();
         for (const svg of document.querySelectorAll('[data-test="graph-canvas"]')) {
             const { container, box, edges } = readCanvas(svg);
             const nodes = nodesWithCentres(container, box);
             for (const { path } of edges) baseline.add(edgeKey(path, nodes));
+            painted.set(svg, paintedLines(edges, nodes));
         }
         const startedAt = performance.now();
         let running = true;
@@ -347,7 +387,7 @@ export function installProbe() {
         };
         const sample = () => {
             if (!running) return;
-            const frame = { t: Math.round(performance.now() - startedAt), misaligned: [], lineOverScalingNode: 0, sliding: 0, draws: [], redrawn: [], offscreenDraws: 0, nodeIn: 0 };
+            const frame = { t: Math.round(performance.now() - startedAt), misaligned: [], lineOverScalingNode: 0, sliding: 0, draws: [], redrawn: [], repainted: [], offscreenDraws: 0, nodeIn: 0 };
 
             for (const svg of document.querySelectorAll('[data-test="graph-canvas"]')) {
                 const { container, box, circles, edges } = readCanvas(svg);
@@ -376,6 +416,18 @@ export function installProbe() {
                         const key = edgeKey(path, nodes);
                         frame.draws.push({ d, key, hidden: Math.round(hidden * 100) / 100 });
                         if (hidden > 0.01 && baseline.has(key)) frame.redrawn.push(d);
+                        // A line taking over from one its node already showed, like the line to a "more replies" dot
+                        // once the replies load: the stretch already painted stays. One waiting for a node at its end to
+                        // scale in, like a reply just posted, draws in full after it instead.
+                        const length = path.getTotalLength();
+                        const ends = [path.getPointAtLength(0), path.getPointAtLength(length)];
+                        const waitsForNode = expectedNodes(container, { strictOnly: true }).some(({ element: node }) => {
+                            const centre = centreOf(node, box);
+                            return nodeInAnimation(node, container) && ends.some((end) => Math.hypot(end.x - centre.x, end.y - centre.y) < 12);
+                        });
+                        if (waitsForNode) scaledIn.add(key);
+                        const repainted = hidden > 0.01 && !scaledIn.has(key) ? repaintedLength(path, hidden, nodes, painted.get(svg) ?? new Map()) : 0;
+                        if (repainted > 4) frame.repainted.push(`${d} (${repainted}px)`);
                         // Drawing a line nobody can see is wasted work.
                         const rect = path.getBoundingClientRect();
                         if (hidden > 0.01 && hidden < 0.99 && (rect.bottom < 0 || rect.top > window.innerHeight)) frame.offscreenDraws++;
