@@ -79,6 +79,7 @@ Frame by frame during animations (`checkFrames`):
 | `scroll` | scrolls until more cards load: their lines show drawn, nothing draws off screen, no mask stays |
 | `quote` | a commit and a quote of it in the same feed: the quote is listed under the quoted card and shows as a card of its own, each with its own node |
 | `deleted` | builds a thread with deleted commits at every depth (a deleted continuation, two deleted replies in a row, a deleted reply above the deepest indent, a deleted leaf that goes, a deleted root) and audits its pages on desktop and mobile: the thread (5 tombstones, the leaf gone), the feed card listing it, threads under deleted ancestors, and replies under a deleted parent or root. A deleted commit has no page of its own (404) |
+| `delete` | deletes a card from the feed and films it: on every frame, the card's lines stay within its collapsing row, fade with it, and its hidden nodes cut no other line. A second deletion is frozen halfway for a screenshot |
 | `swap` | swaps two cards of the same height in the DOM: only a `MutationObserver` can follow |
 | `arrival` | a peer posts, the "new commits" button shows up (30 s poll), click it |
 | `thread-open` | opens a thread right after creating it: nothing pops again |

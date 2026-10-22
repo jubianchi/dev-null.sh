@@ -345,6 +345,69 @@ export const scenarios = [
         },
     },
     {
+        name: 'delete',
+        title: 'Deleting a commit from the feed: its lines fade and clip with its collapsing row',
+        async run(lab) {
+            const deleter = await lab.as(cast.deleter);
+            const peer = await lab.as(cast.peer);
+            const labels = [unique('delete filmed'), unique('delete shot')];
+            for (const label of labels) {
+                const body = `${label}\n\nA longer body, so the card's line runs well below its node.\n\nA second paragraph.\n\nA third one.`;
+                const id = await postCommit(deleter, cast.deleter, body);
+                await postReply(peer, cast.peer, id, unique('delete reply'));
+            }
+
+            const page = await lab.open(cast.deleter, '/log/latest');
+            const start = async (label) => {
+                const card = page.locator('[data-test="commit"]', { hasText: label }).first();
+                await card.evaluate((element) => {
+                    element.scrollIntoView({ block: 'center' });
+                    element.dataset.glabLeaving = '';
+                });
+                await lab.settle(page, 400);
+                await card.hover();
+                await card.locator('[data-test="delete-commit-button"]').click();
+                return card.locator('[data-test="confirm-delete-commit-button"]');
+            };
+
+            const confirmFilmed = await start(labels[0]);
+            const frames = await lab.record(page, () => confirmFilmed.click(), { duration: 1400, film: 'deleting a commit' });
+            const leaving = frames.filter((frame) => frame.leaving && !frame.leaving.isGone);
+            const at = (frame) => `at ${frame.t}ms, row ${frame.leaving.rowHeight}px at ${frame.leaving.rowOpacity}${frame.leaving.worst ? `, line ${frame.leaving.worst}` : ''}`;
+            if (lab.check('the row fades and collapses', leaving.some((frame) => frame.leaving.rowOpacity < 0.5), [`${leaving.length} frames`])) {
+                const overflowing = leaving.filter((frame) => frame.leaving.overflow > 2);
+                lab.check('its lines stay within the row as it collapses', overflowing.length === 0, overflowing.slice(0, 4).map((frame) => `${at(frame)}: lines run ${frame.leaving.overflow}px past it`));
+                const opaque = leaving.filter((frame) => frame.leaving.excess > 0.05);
+                lab.check('its lines fade with the row', opaque.length === 0, opaque.slice(0, 4).map((frame) => `${at(frame)}: lines ${frame.leaving.excess} more opaque`));
+                const holed = leaving.filter((frame) => frame.leaving.holes > 0);
+                lab.check('its hidden nodes cut no other line', holed.length === 0, holed.slice(0, 4).map((frame) => `${at(frame)}: ${frame.leaving.holes} hole(s)`));
+            }
+            checkFrames(lab, 'deleting a commit', frames);
+            await lab.audit(page, 'after deleting');
+
+            // Halfway through the fade, frozen: the card's 700ms removal is held and the transitions paused for the shot.
+            const confirmShot = await start(labels[1]);
+            await page.evaluate(() => {
+                const setTimeout = window.setTimeout;
+                window.setTimeout = (callback, delay, ...rest) => {
+                    if (delay !== 700) return setTimeout(callback, delay, ...rest);
+                    window.setTimeout = setTimeout;
+                    window.__glabHeld = () => callback(...rest);
+                    return 0;
+                };
+            });
+            await confirmShot.click();
+            await page.waitForTimeout(550);
+            await page.evaluate(() => document.getAnimations().forEach((animation) => animation.pause()));
+            await lab.shot(page, 'mid-deletion', { fullPage: false });
+            await page.evaluate(() => document.getAnimations().forEach((animation) => animation.play()));
+            await page.waitForTimeout(400);
+            await page.evaluate(() => window.__glabHeld?.());
+            await lab.settle(page, 1200);
+            await lab.audit(page, 'after deleting again', { screenshot: false });
+        },
+    },
+    {
         name: 'swap',
         title: 'Cards trading places without any resize: lines follow in the same frame',
         async run(lab) {

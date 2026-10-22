@@ -112,6 +112,7 @@ export const cast = {
     quoter: 'glab-quoter',
     eraser: 'glab-eraser',
     survivor: 'glab-survivor',
+    deleter: 'glab-deleter',
 };
 
 /**

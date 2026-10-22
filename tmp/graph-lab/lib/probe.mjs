@@ -420,6 +420,10 @@ export function installProbe() {
                 frame.dot = scaleOf(anchors.find((anchor) => anchor.dataset.test === 'rail-end-dot'));
             }
 
+            // The card a scenario marked as being removed: its lines fade and clip with its row, as the rail did.
+            const leavingCard = document.querySelector('[data-glab-leaving]');
+            if (leavingCard) frame.leaving = leavingOf(leavingCard);
+
             frames.push(frame);
         };
         requestAnimationFrame(tick);
@@ -428,6 +432,83 @@ export function installProbe() {
             running = false;
             return frames;
         };
+    }
+
+    // The rect an element of the canvas is clipped to, through its own clip-path and its groups', in canvas coordinates.
+    function clipRectOf(element, svg) {
+        let rect = null;
+        for (let current = element; current && current !== svg; current = current.parentElement) {
+            const id = getComputedStyle(current).clipPath.match(/url\("?#([^")]+)"?\)/)?.[1];
+            const shape = id ? document.getElementById(id)?.querySelector('rect') : null;
+            if (!shape) continue;
+            const { x, y, width, height } = shape.getBBox();
+            rect = rect
+                ? { top: Math.max(rect.top, y), bottom: Math.min(rect.bottom, y + height), left: Math.max(rect.left, x), right: Math.min(rect.right, x + width) }
+                : { top: y, bottom: y + height, left: x, right: x + width };
+        }
+        return rect;
+    }
+
+    const opacityUpTo = (element, stop) => {
+        let opacity = 1;
+        for (let current = element; current && current !== stop; current = current.parentElement) opacity *= Number(getComputedStyle(current).opacity);
+        return opacity;
+    };
+
+    // What a removed card's lines show against its row: how far they run past the row's visible part, how much more
+    // opaque they are than the row, and how many of its hidden nodes still cut holes in other cards' lines.
+    function leavingOf(card) {
+        const svg = [...document.querySelectorAll('[data-test="graph-canvas"]')].find((canvas) => canvas.parentElement.contains(card));
+        if (!svg || !card.isConnected) return { isGone: true };
+        const { container, box, circles, edges } = readCanvas(svg);
+        const row = card.getBoundingClientRect();
+        const rowTop = row.top - box.top;
+        const rowBottom = row.bottom - box.top;
+        const rowOpacity = opacityUpTo(card, container);
+        const nodes = [...card.querySelectorAll('[class*="group/rail-node"], [data-test="reply"] a[class*="rounded-full"], [data-test="reply-tombstone"] span[class*="border-dashed"]')].map(
+            (element) => centreOf(element.querySelector?.('a[class*="rounded-full"]') ?? element, box),
+        );
+        // Another card's node can pass right over one of the hidden nodes as the row collapses: its lines are its own.
+        const elsewhere = expectedNodes(container)
+            .map(({ element }) => element)
+            .filter((element) => !card.contains(element))
+            .map((element) => centreOf(element, box));
+        const near = (list, point) => list.some((node) => Math.hypot(node.x - point.x, node.y - point.y) < 1.5);
+        const onCard = (point) => near(nodes, point) && !near(elsewhere, point);
+        const result = { rowHeight: Math.round(row.height), rowOpacity: Math.round(rowOpacity * 100) / 100, lines: 0, overflow: 0, excess: 0, holes: 0 };
+        const others = [];
+
+        for (const { path } of edges) {
+            const length = path.getTotalLength();
+            if (![path.getPointAtLength(0), path.getPointAtLength(length)].some(onCard)) {
+                others.push({ path });
+                continue;
+            }
+            result.lines++;
+            const opacity = opacityUpTo(path, svg);
+            if (opacity < 0.01) continue;
+            result.excess = Math.max(result.excess, Math.round((opacity - rowOpacity) * 100) / 100);
+            const bbox = path.getBBox();
+            const clip = clipRectOf(path, svg);
+            const top = Math.max(bbox.y, clip?.top ?? -Infinity);
+            const bottom = Math.min(bbox.y + bbox.height, clip?.bottom ?? Infinity);
+            const overflow = bottom > top ? Math.round(Math.max(bottom - rowBottom, rowTop - top)) : 0;
+            if (overflow > result.overflow || opacity - rowOpacity > 0.05) result.worst = `${path.getAttribute('d')} (opacity ${Math.round(opacity * 100) / 100}, ${path.getAttribute('clip-path') ? 'clipped' : 'unclipped'}, ${svg.querySelectorAll('clipPath').length} clip(s))`;
+            result.overflow = Math.max(result.overflow, overflow);
+        }
+
+        for (const node of nodes) {
+            if (node.y >= rowTop && node.y <= rowBottom) continue;
+            const circle = [...svg.querySelectorAll('mask[id$="-nodes"] circle')].find(
+                (shape) => Math.hypot(Number(shape.getAttribute('cx')) - node.x, Number(shape.getAttribute('cy')) - node.y) < 1.5,
+            );
+            if (!circle) continue;
+            const clip = clipRectOf(circle, svg);
+            if (clip && (node.y < clip.top - 1 || node.y > clip.bottom + 1)) continue;
+            if (lineTouches(others, node, Number(circle.getAttribute('r')))) result.holes++;
+        }
+
+        return result;
     }
 
     // A line is dimmed exactly when one of its card nodes is: checked on lines whose two ends are card nodes.
