@@ -42,9 +42,10 @@ On every page, and after every action (`audit`):
 - every card node, reply avatar, deleted reply's tombstone and "more replies" dot has its cut-out;
 - every line starts and ends on a node, or starts on another line (a branch): no gap;
 - lines are 2 px wide, dashed ones use `4 4`, solid ones have no dashes;
-- fades and masks a line refers to exist, opacity is 1 or 0.6;
+- no line fades into another lane (upstream took fades out in 9e465e64), the masks a line refers to exist, opacity is 1
+  or 0.6;
 - no line runs through a node, no line doubles another (but along a branch's 12 px junction);
-- each line wears the lane of the rail node at either end;
+- each line wears the lane of the rail node it leaves, end to end, as the rail did;
 - no old rail piece shows once the canvas draws, and the canvas is the size of its container;
 - no line keeps its draw mask once it has drawn;
 - **pixels**: on the screenshot, each line is actually painted (its lane, blended at its opacity over the background

@@ -144,27 +144,14 @@ export function installProbe() {
         return host ? toRgb(getComputedStyle(host).getPropertyValue('--lane').trim()) : null;
     };
 
-    // The colours a line starts and ends with: its stroke, or its fade's first and last stops.
-    const lineColours = (path) => {
-        const stroke = path.style.stroke;
-        if (!stroke.startsWith('url(')) {
-            const colour = getComputedStyle(path).stroke;
-            return [colour, colour];
-        }
-        const stops = [...(document.getElementById(stroke.slice(5, -1).replaceAll('"', '').replace(/^#/, ''))?.querySelectorAll('stop') ?? [])];
-        return stops.length ? [toRgb(stops[0].style.stopColor), toRgb(stops.at(-1).style.stopColor)] : [null, null];
-    };
-
-    // A line wearing another lane than its nodes: a node moved and the canvas didn't follow.
+    // A line keeps the lane of the node it leaves to its end, as the rail did: no fade into the next author's lane.
     const laneMismatches = (edges, nodes) =>
         edges.flatMap(({ path, d }) => {
-            const length = path.getTotalLength();
-            const colours = lineColours(path);
-            return [path.getPointAtLength(0), path.getPointAtLength(length)].flatMap((end, index) => {
-                const node = nodes.find(({ centre }) => Math.hypot(centre.x - end.x, centre.y - end.y) < 1.5);
-                const lane = node && laneOf(node.element);
-                return lane && colours[index] && lane !== colours[index] ? [`line ${d} ${index ? 'ends' : 'starts'} in ${colours[index]} but its node's lane is ${lane}`] : [];
-            });
+            const start = path.getPointAtLength(0);
+            const node = nodes.find(({ centre }) => Math.hypot(centre.x - start.x, centre.y - start.y) < 1.5);
+            const lane = node && laneOf(node.element);
+            const colour = path.style.stroke.startsWith('url(') ? null : getComputedStyle(path).stroke;
+            return lane && colour && lane !== colour ? [`line ${d} is ${colour} but the node it leaves is ${lane}`] : [];
         });
 
     // Names a line by the node elements at its two ends, so a line keeps its name when it moves.
@@ -282,12 +269,9 @@ export function installProbe() {
                 if (isDashed && dasharray !== '4 4') issues.push(`dashed line ${d} has dashes "${dasharray}", not "4 4"`);
                 if (!isDashed && dasharray) issues.push(`solid line ${d} has dashes "${dasharray}"`);
 
-                const stroke = path.style.stroke;
-                if (stroke.startsWith('url(')) {
+                if (path.style.stroke.startsWith('url(')) {
                     stats.faded++;
-                    const gradient = document.getElementById(stroke.slice(5, -1).replaceAll('"', '').replace(/^#/, ''));
-                    if (!gradient) issues.push(`line ${d} fades through a missing gradient`);
-                    else if (gradient.querySelectorAll('stop').length < 2) issues.push(`line ${d} fade has fewer than 2 stops`);
+                    issues.push(`line ${d} fades into another lane (${path.style.stroke}): upstream took fades out (9e465e64)`);
                 }
 
                 const mask = path.getAttribute('mask');
@@ -555,9 +539,10 @@ export function installProbe() {
             for (const { path, d } of edges) {
                 const length = path.getTotalLength();
                 const start = path.getPointAtLength(0);
-                const end = path.getPointAtLength(length);
                 const startsOnLine = !circles.some((c) => Math.hypot(c.x - start.x, c.y - start.y) < 1.5);
-                const [from, to] = lineColours(path);
+                // One colour end to end: the pixel check's blend from one lane to the next stays at the first.
+                const from = getComputedStyle(path).stroke;
+                const to = from;
                 const opacity = Number(path.getAttribute('opacity') ?? 1);
                 const samples = [];
                 for (let at = 2; at < length - 2; at += 4) {
@@ -569,15 +554,12 @@ export function installProbe() {
                     const tx = ahead.x - point.x;
                     const ty = ahead.y - point.y;
                     const norm = Math.hypot(tx, ty) || 1;
-                    // Position along the fade, which holds the first lane for half the line.
-                    const span = Math.hypot(end.x - start.x, end.y - start.y) || 1;
-                    const along = ((point.x - start.x) * (end.x - start.x) + (point.y - start.y) * (end.y - start.y)) / (span * span);
                     samples.push({
                         x: page.x + point.x,
                         y: page.y + point.y,
                         bx: page.x + point.x - (ty / norm) * 6,
                         by: page.y + point.y + (tx / norm) * 6,
-                        mix: Math.max(0, Math.min(1, (along - 0.5) / 0.5)),
+                        mix: 0,
                     });
                 }
                 lines.push({ d, from, to, opacity, dashed: path.dataset.test === 'graph-edge-dashed', samples });
