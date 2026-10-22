@@ -39,7 +39,7 @@ run the dev server and the lab with `PGGSSENCMODE=disable`.
 On every page, and after every action (`audit`):
 
 - every cut-out of the node mask sits on a node (within 1.5 px, with a radius at least as large as the ring);
-- every card node, reply avatar and "more replies" dot has its cut-out;
+- every card node, reply avatar, deleted reply's tombstone and "more replies" dot has its cut-out;
 - every line starts and ends on a node, or starts on another line (a branch): no gap;
 - lines are 2 px wide, dashed ones use `4 4`, solid ones have no dashes;
 - fades and masks a line refers to exist, opacity is 1 or 0.6;
@@ -78,6 +78,7 @@ Frame by frame during animations (`checkFrames`):
 | `reorder` | posts to *Trending*, which reorders the cards |
 | `scroll` | scrolls until more cards load: their lines show drawn, nothing draws off screen, no mask stays |
 | `quote` | a commit and a quote of it in the same feed: the quote is listed under the quoted card and shows as a card of its own, each with its own node |
+| `deleted` | builds a thread with deleted commits at every depth (a deleted continuation, two deleted replies in a row, a deleted reply above the deepest indent, a deleted leaf that goes, a deleted root) and audits its pages on desktop and mobile: the thread (5 tombstones, the leaf gone), the feed card listing it, threads under deleted ancestors, and replies under a deleted parent or root. A deleted commit has no page of its own (404) |
 | `swap` | swaps two cards of the same height in the DOM: only a `MutationObserver` can follow |
 | `arrival` | a peer posts, the "new commits" button shows up (30 s poll), click it |
 | `thread-open` | opens a thread right after creating it: nothing pops again |
@@ -135,7 +136,7 @@ An old ref may not start on a database migrated past it (`before did not start`)
 
 ## Accounts and data
 
-The lab plays local `glab-*` accounts (`glab-author`, `glab-peer`, `glab-pal`, and one account per scenario that posts),
+The lab plays local `glab-*` accounts (`glab-author`, `glab-peer`, `glab-pal`, and one or two accounts per scenario that posts),
 created on first sign-in. New accounts post into the moderation queue: `lib/reputation.php` gives them, through
 `artisan tinker`, the reputation that skips it (a day old, 10 `glab-fan-*` followers, an approved commit). All of this
 only touches the dev database.

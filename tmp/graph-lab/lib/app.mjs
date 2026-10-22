@@ -55,7 +55,8 @@ export async function postCommit(context, username, body, { quote } = {}) {
     const response = await send(async () =>
         context.request.post('/commits', {
             headers: { 'X-XSRF-TOKEN': await xsrf(context), 'X-Inertia': 'true' },
-            data: quote ? { body, quoted_commit_id: quote } : { body },
+            // A new account's first commit accepts the commit rules, as the composer does.
+            data: { body, commit_rules_accepted: true, ...(quote ? { quoted_commit_id: quote } : {}) },
             maxRedirects: 0,
         }),
     );
@@ -72,12 +73,23 @@ export async function postReply(context, username, parentId, body) {
     const response = await send(async () =>
         context.request.post(`/commits/${parentId}/replies`, {
             headers: { 'X-XSRF-TOKEN': await xsrf(context), Accept: 'application/json' },
-            data: { body },
+            data: { body, commit_rules_accepted: true },
         }),
     );
     if (response.status() === 429) throw new Error(`@${username} hit the commit rate limit (10 per minute): wait a minute`);
     if (!response.ok()) throw new Error(`replying as @${username} failed: ${response.status()} ${await response.text()}`);
     return (await response.json()).committed.id;
+}
+
+/** Deletes one of the account's own commits, which stays in its thread as a tombstone while it has replies. */
+export async function deleteCommit(context, username, id) {
+    const response = await send(async () =>
+        context.request.delete(`/commits/${id}`, {
+            headers: { 'X-XSRF-TOKEN': await xsrf(context), 'X-Inertia': 'true' },
+            maxRedirects: 0,
+        }),
+    );
+    if (response.status() >= 400) throw new Error(`deleting ${id} as @${username} failed: ${response.status()}`);
 }
 
 export async function follow(context, username) {
@@ -98,6 +110,8 @@ export const cast = {
     calm: 'glab-calm',
     quoted: 'glab-quoted',
     quoter: 'glab-quoter',
+    eraser: 'glab-eraser',
+    survivor: 'glab-survivor',
 };
 
 /**

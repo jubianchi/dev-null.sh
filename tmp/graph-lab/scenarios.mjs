@@ -1,4 +1,4 @@
-import { cast, postCommit, postReply, viewports } from './lib/app.mjs';
+import { cast, deleteCommit, postCommit, postReply, viewports } from './lib/app.mjs';
 import { checkEntrance, checkFrames, drawnLines } from './lib/lab.mjs';
 import { withSsr } from './lib/ssr.mjs';
 
@@ -266,6 +266,82 @@ export const scenarios = [
                 .count();
             lab.check('the quote shows under the commit it quotes', listed > 0);
             await lab.audit(page, 'quote and quoted commit in one feed');
+        },
+    },
+    {
+        name: 'deleted',
+        title: 'Deleted commits at every depth of a thread: tombstones keep their node and their lines',
+        async run(lab) {
+            const as = Object.fromEntries(
+                await Promise.all(['eraser', 'peer', 'pal', 'survivor'].map(async (role) => [role, await lab.as(cast[role])])),
+            );
+            const post = (role, label) => postCommit(as[role], cast[role], unique(label));
+            const reply = (role, parent, label) => postReply(as[role], cast[role], parent, unique(label));
+            const erase = (role, id) => deleteCommit(as[role], cast[role], id);
+
+            // root
+            // ├─ self 1 (deleted, the continuation) ─ self 2
+            // ├─ a (deleted) ─ a1 (deleted) ─ a1a
+            // ├─ b ─ b1 (deleted) ─ b1a
+            // │    └ b2 ─ b2a (deleted) ─ b2a1 (past the deepest indent)
+            // └─ leaf (deleted, without replies: it goes)
+            // other root (deleted) ─ other reply
+            const root = await post('eraser', 'deleted root');
+            const self1 = await reply('eraser', root, 'deleted self 1');
+            await reply('eraser', self1, 'deleted self 2');
+            const a = await reply('peer', root, 'deleted a');
+            const a1 = await reply('pal', a, 'deleted a1');
+            const a1a = await reply('survivor', a1, 'deleted a1a');
+            const b = await reply('pal', root, 'deleted b');
+            const b1 = await reply('peer', b, 'deleted b1');
+            await reply('survivor', b1, 'deleted b1a');
+            const b2 = await reply('survivor', b, 'deleted b2');
+            const b2a = await reply('peer', b2, 'deleted b2a');
+            const b2a1 = await reply('pal', b2a, 'deleted b2a1');
+            const leaf = await reply('survivor', root, 'deleted leaf');
+            const otherRoot = await post('eraser', 'deleted other root');
+            await reply('peer', otherRoot, 'deleted other reply');
+
+            await erase('eraser', self1);
+            await erase('peer', a);
+            await erase('pal', a1);
+            await erase('peer', b1);
+            await erase('peer', b2a);
+            await erase('survivor', leaf);
+            await erase('eraser', otherRoot);
+
+            const pages = [
+                { name: 'thread', path: `/@${cast.eraser}/commits/${root}`, tombstones: 5 },
+                { name: 'feed', path: '/log/latest', card: root },
+                { name: 'under two deleted ancestors', path: `/@${cast.survivor}/commits/${a1a}` },
+                { name: 'past the deepest indent', path: `/@${cast.pal}/commits/${b2a1}` },
+                { name: 'replies under deleted parents', path: `/@${cast.survivor}?tab=replies` },
+                { name: 'under a deleted root', path: `/@${cast.peer}?tab=replies` },
+            ];
+
+            for (const [variant, viewport] of [
+                ['desktop', viewports.desktop],
+                ['mobile', viewports.mobile],
+            ]) {
+                const page = await (await lab.as(cast.author, { viewport })).newPage();
+                for (const { name, path, tombstones, card } of pages) {
+                    const response = await page.goto(path);
+                    if (!lab.check(`${name} (${variant}) opens`, response.ok(), [`${path}: ${response.status()}`])) continue;
+                    await lab.settle(page);
+                    const scope = card ? page.locator('[data-test="commit"]', { has: page.locator(`[href$="${card}"]`) }).first() : page;
+                    for (let round = 0; round < 12; round++) {
+                        const toggles = scope.locator('[data-test="toggle-replies-button"][aria-expanded="false"]');
+                        if ((await toggles.count()) === 0) break;
+                        await toggles.first().click();
+                        await lab.settle(page, 600);
+                    }
+                    if (tombstones !== undefined) {
+                        const shown = await page.locator('[data-test="reply-tombstone"]').count();
+                        lab.check(`${name} (${variant}): ${tombstones} tombstones (the continuation, a, a1, b1, b2a), the deleted leaf gone`, shown === tombstones, [`${shown} tombstones`]);
+                    }
+                    await lab.audit(page, `${name} (${variant})`);
+                }
+            }
         },
     },
     {

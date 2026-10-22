@@ -89,6 +89,10 @@ export function installProbe() {
             const avatar = reply.querySelector('a.rounded-full, a[class*="rounded-full"]');
             if (avatar && isVisible(avatar)) found.add(avatar);
         }
+        for (const tombstone of container.querySelectorAll('[data-test="reply-tombstone"]')) {
+            const node = tombstone.querySelector(':scope > div span[class*="border-dashed"]');
+            if (node && isVisible(node)) found.add(node);
+        }
         for (const button of container.querySelectorAll('[data-test="more-replies-button"]')) {
             const dot = [...button.querySelectorAll('[aria-hidden] *')].find((element) => isRound(element) && isVisible(element));
             if (dot) found.add(dot);
@@ -192,6 +196,18 @@ export function installProbe() {
         return { container, box, circles, edges };
     }
 
+    // Whether a point sits on a line, gaps between its dashes included: a branch may leave a dashed trunk between two dashes.
+    const inStroke = (path, point) => {
+        const dashes = path.style.strokeDasharray;
+        path.style.strokeDasharray = 'none';
+        const isIn = path.isPointInStroke(point);
+        path.style.strokeDasharray = dashes;
+        return isIn;
+    };
+
+    // A canvas has drawn once it has measured nodes: until then it cuts no ring out of its mask.
+    const hasDrawn = (svg) => svg.querySelector('mask[id$="-nodes"] circle') !== null;
+
     function matchCircles(container, svg, box, circles) {
         const pool = candidates(container, svg).map((element) => ({ element, centre: centreOf(element, box), half: element.offsetWidth / 2 }));
         return circles.map((circle) => {
@@ -210,7 +226,7 @@ export function installProbe() {
 
         for (const svg of canvases) {
             const { container, box, circles, edges } = readCanvas(svg);
-            const isDrawn = Number(svg.getAttribute('width')) > 0;
+            const isDrawn = hasDrawn(svg);
             stats.nodes += circles.length;
             stats.edges += edges.length;
 
@@ -219,8 +235,9 @@ export function installProbe() {
                 continue;
             }
 
-            if (Math.abs(Number(svg.getAttribute('width')) - box.width) > 1 || Math.abs(Number(svg.getAttribute('height')) - box.height) > 1) {
-                issues.push(`canvas size ${svg.getAttribute('width')}x${Math.round(svg.getAttribute('height'))} ≠ container ${Math.round(box.width)}x${Math.round(box.height)}`);
+            const size = svg.getBoundingClientRect();
+            if (Math.abs(size.left - box.left) > 1 || Math.abs(size.top - box.top) > 1 || Math.abs(size.width - box.width) > 1 || Math.abs(size.height - box.height) > 1) {
+                issues.push(`canvas ${Math.round(size.width)}x${Math.round(size.height)} at ${Math.round(size.left - box.left)},${Math.round(size.top - box.top)} ≠ container ${Math.round(box.width)}x${Math.round(box.height)}`);
             }
 
             const leftovers = [...container.querySelectorAll(railPieces)].filter(isVisible);
@@ -293,7 +310,7 @@ export function installProbe() {
                 if (!endCircle) issues.push(`line ${d} ends at ${Math.round(edge.end.x)},${Math.round(edge.end.y)}, on no node: gap`);
 
                 const startCircle = circles.find((c) => Math.hypot(c.x - edge.start.x, c.y - edge.start.y) < 1.5);
-                const startsOnTrunk = sampled.some((other) => other !== edge && other.path.isPointInStroke(new DOMPoint(edge.start.x, edge.start.y)));
+                const startsOnTrunk = sampled.some((other) => other !== edge && inStroke(other.path, new DOMPoint(edge.start.x, edge.start.y)));
                 if (!startCircle && !startsOnTrunk) issues.push(`line ${d} starts at ${Math.round(edge.start.x)},${Math.round(edge.start.y)}, on no node or line: gap`);
 
                 const crossed = circles.filter(
@@ -350,7 +367,7 @@ export function installProbe() {
 
             for (const svg of document.querySelectorAll('[data-test="graph-canvas"]')) {
                 const { container, box, circles, edges } = readCanvas(svg);
-                if (Number(svg.getAttribute('width')) === 0) continue;
+                if (!hasDrawn(svg)) continue;
                 const nodes = nodesWithCentres(container, box);
                 frame.misaligned.push(...laneMismatches(edges, nodes));
 
@@ -452,7 +469,7 @@ export function installProbe() {
         const covered = (x, y) => overlays.some((rect) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom);
         for (const svg of document.querySelectorAll('[data-test="graph-canvas"]')) {
             const { box, circles, edges } = readCanvas(svg);
-            if (Number(svg.getAttribute('width')) === 0) continue;
+            if (!hasDrawn(svg)) continue;
             const page = { x: box.left + window.scrollX, y: box.top + window.scrollY };
             for (const { path, d } of edges) {
                 const length = path.getTotalLength();
