@@ -663,6 +663,43 @@ export const scenarios = [
         },
     },
     {
+        name: 'go-on',
+        title: "Going on with one's thread under a commit with replies: their branches stay drawn as the trunk goes on",
+        async run(lab) {
+            const context = await lab.as(cast.continuer);
+            const peer = await lab.as(cast.peer);
+            const body = unique('go on');
+            const root = await postCommit(context, cast.continuer, body);
+            for (const index of [1, 2, 3]) {
+                // The unique CheckUserLevel job's lock (see `chain`).
+                await new Promise((resolve) => setTimeout(resolve, 3000));
+                await postReply(peer, cast.peer, root, `${body} reply ${index}`);
+            }
+            await new Promise((resolve) => setTimeout(resolve, 3000));
+            const page = await context.newPage();
+            await page.goto(`/@${cast.continuer}/commits/${root}`);
+            await lab.settle(page);
+            await lab.expandReplies(page);
+            await page.locator('[data-test="commit"]').last().getByRole('button', { name: /^Reply/ }).first().click();
+            await page.waitForTimeout(300);
+            const frames = await lab.record(
+                page,
+                async () => {
+                    await page.locator('textarea').last().click();
+                    await page.keyboard.type(`${body} going on`);
+                    await page.keyboard.press('Meta+Enter');
+                },
+                { duration: 3500, film: 'going on' },
+            );
+            checkFrames(lab, 'going on', frames);
+            checkJoined(lab, 'going on', frames);
+            // The only new lines run down the trunk: a line turning to a reply is a branch already there drawing again.
+            const redrawn = [...new Set(frames.flatMap((frame) => frame.draws).filter(({ d, hidden }) => hidden > 0.01 && / H [\d.]+$/.test(d)).map(({ d }) => d))];
+            lab.check('going on: the branches to the replies already there stay drawn', redrawn.length === 0, redrawn.slice(0, 4));
+            await lab.audit(page, 'after going on');
+        },
+    },
+    {
         name: 'long-chain',
         title: 'Replying to oneself under a long thread: the line runs on to the new commit and its end dot',
         async run(lab) {

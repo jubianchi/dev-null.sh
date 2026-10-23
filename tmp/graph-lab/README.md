@@ -90,6 +90,7 @@ Frame by frame during animations (`checkFrames`):
 | `thread-open` | opens a thread right after creating it: nothing pops again |
 | `chain` | replies to oneself on the thread page |
 | `first-chain` | replies to oneself twice under a commit of its own, from its page |
+| `go-on` | goes on with one's thread under a commit with three replies from someone else: their branches stay drawn |
 | `long-chain` | replies to oneself under a thread of six commits: the line runs on to the new commit and its end dot |
 | `hover` | hovers an author: lines dim exactly with their nodes, and no node registers again |
 | `resize` | resizes the window continuously |
@@ -203,3 +204,4 @@ Each bug fixed during the rework, put back by hand, fails the lab:
 | the same commit registered twice, as a card and as a quote under another card | `quote` |
 | a line waiting for its node to scale in drawing in full, so the stretch already painted vanishes and draws again | `chain`, `first-chain`, `long-chain` |
 | a chained reply's node scaling in apart from the thread while the line to it waits or catches up | `chain`, `first-chain`, `long-chain` |
+| the branches to a commit's replies drawing themselves in again as the thread goes on below it | `go-on` |
