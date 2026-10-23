@@ -32,16 +32,17 @@ function inkOf(png, region, scale, nodes) {
     let ink = 0;
     const colour = [0, 0, 0];
     const columns = new Map();
-    const rows = new Set();
+    const rows = new Map();
     for (let py = top; py < bottom; py++) {
         for (let px = left; px < right; px++) {
             if (!painted(px, py)) continue;
             ink++;
             at(px, py).forEach((value, channel) => (colour[channel] += value));
             columns.set(px, (columns.get(px) ?? 0) + 1);
-            rows.add(py);
+            rows.set(py, (rows.get(py) ?? 0) + 1);
         }
     }
+    const perRow = [...rows.values()].sort((x, y) => x - y);
 
     // Dashes down the most painted column, leaving out the runs cut by the region's edges.
     let dash = null;
@@ -62,8 +63,10 @@ function inkOf(png, region, scale, nodes) {
 
     return {
         ink: ink / (scale * scale),
-        // How thick the line is where it's painted, whatever its dashes' phase: its ink over the rows it paints.
-        width: rows.size ? ink / rows.size / scale : null,
+        // How thick the line is where it's painted, whatever its dashes' phase: the ink of its median painted row. An
+        // elbow's few horizontal rows hold most of its ink, so its ink over all its rows would swing with how many
+        // dashes its vertical stretch holds.
+        width: perRow.length ? perRow[Math.floor(perRow.length / 2)] / scale : null,
         colour: ink ? colour.map((value) => value / ink) : null,
         dash,
     };
