@@ -3,7 +3,7 @@ import { checkEntrance, checkFrames, drawnLines } from './lib/lab.mjs';
 import { compareRegions } from './lib/pixels.mjs';
 import { withSsr } from './lib/ssr.mjs';
 
-const railPieceNames = ['rail-tail', 'rail-previous', 'commit-reply-spine', 'thread-spine', 'thread-elbow', 'reply-link', 'reply-tail'];
+const railPieceNames = ['rail-tail', 'rail-previous', 'commit-reply-spine', 'thread-spine', 'thread-elbow', 'thread-column', 'reply-link', 'reply-tail'];
 const railPiecesPattern = new RegExp(`data-test="(${railPieceNames.join('|')})"`, 'g');
 const railPieces = railPieceNames.map((name) => `[data-test="${name}"]`).join(',');
 
