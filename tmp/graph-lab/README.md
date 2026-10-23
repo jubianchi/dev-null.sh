@@ -86,6 +86,7 @@ Frame by frame during animations (`checkFrames`):
 | `arrival` | a peer posts, the "new commits" button shows up (30 s poll), click it |
 | `thread-open` | opens a thread right after creating it: nothing pops again |
 | `chain` | replies to oneself on the thread page |
+| `long-chain` | replies to oneself under a thread of six commits: the line runs on to the new commit and its end dot |
 | `hover` | hovers an author: lines dim exactly with their nodes, and no node registers again |
 | `resize` | resizes the window continuously |
 | `navigate` | chains navigations (avatar to profile, permalink to thread, tab, notifications, back and forward): every page is clean and nothing is logged |

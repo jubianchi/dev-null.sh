@@ -107,6 +107,7 @@ export const cast = {
     ranker: 'glab-ranker',
     threader: 'glab-threader',
     chainer: 'glab-chainer',
+    longChainer: 'glab-long-chainer',
     calm: 'glab-calm',
     quoted: 'glab-quoted',
     quoter: 'glab-quoter',

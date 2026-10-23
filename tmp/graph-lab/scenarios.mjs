@@ -623,6 +623,42 @@ export const scenarios = [
         },
     },
     {
+        name: 'long-chain',
+        title: 'Replying to oneself under a long thread: the line runs on to the new commit and its end dot',
+        async run(lab) {
+            const context = await lab.as(cast.longChainer);
+            const body = unique('long chain');
+            let last = await postCommit(context, cast.longChainer, body);
+            const root = last;
+            for (let index = 1; index < 6; index++) {
+                // Each post holds the unique CheckUserLevel job's lock until the queue has run it (see `chain`).
+                await new Promise((resolve) => setTimeout(resolve, 3000));
+                last = await postReply(context, cast.longChainer, last, `${body} ${index}`);
+            }
+            await new Promise((resolve) => setTimeout(resolve, 3000));
+            const page = await context.newPage();
+            await page.goto(`/@${cast.longChainer}/commits/${root}`);
+            await lab.settle(page);
+            await page.locator('[data-test="commit"]').last().getByRole('button', { name: /^Reply/ }).first().click();
+            await page.waitForTimeout(300);
+            const frames = await lab.record(
+                page,
+                async () => {
+                    await page.locator('textarea').last().click();
+                    await page.keyboard.type(`${body} 6`);
+                    await page.keyboard.press('Meta+Enter');
+                },
+                { duration: 3500, film: 'chained reply' },
+            );
+            checkFrames(lab, 'chained reply', frames);
+            await lab.audit(page, 'after the chained reply');
+            lab.check(
+                'after the chained reply: the last commit ends on its dot',
+                (await page.locator('[data-test="commit"]').last().locator('[data-test="rail-end-dot"]').count()) === 1,
+            );
+        },
+    },
+    {
         name: 'hover',
         title: 'Hovering an author dims the other lanes, lines with their nodes',
         async run(lab) {
