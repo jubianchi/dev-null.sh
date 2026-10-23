@@ -63,8 +63,11 @@ Frame by frame during animations (`checkFrames`):
 - no line slides (a transition on `d`);
 - no line already there draws itself in again;
 - no line draws itself in off screen;
-- no line draws itself in while a node at its end scales in;
-- when posting: the avatar scales in, then the line draws, then the end dot pops, with no pause between line and dot.
+- no line draws itself in while a node at its end scales in, but a line taking over one that just left, which shows in
+  full at once;
+- when posting: the avatar scales in, then the line draws, then the end dot pops, with no pause between line and dot;
+- when replying to oneself under the last commit of a thread: the new commit scales in on the line to it, never apart
+  from the thread.
 
 ## Scenarios
 
@@ -86,6 +89,7 @@ Frame by frame during animations (`checkFrames`):
 | `arrival` | a peer posts, the "new commits" button shows up (30 s poll), click it |
 | `thread-open` | opens a thread right after creating it: nothing pops again |
 | `chain` | replies to oneself on the thread page |
+| `first-chain` | replies to oneself twice under a commit of its own, from its page |
 | `long-chain` | replies to oneself under a thread of six commits: the line runs on to the new commit and its end dot |
 | `hover` | hovers an author: lines dim exactly with their nodes, and no node registers again |
 | `resize` | resizes the window continuously |
@@ -197,4 +201,5 @@ Each bug fixed during the rework, put back by hand, fails the lab:
 | a console warning | every scenario (console check) |
 | measuring synchronously on a resize observer's first report (loop error when navigating) | `navigate` |
 | the same commit registered twice, as a card and as a quote under another card | `quote` |
-| a line waiting for its node to scale in drawing in full, so the stretch already painted vanishes and draws again | `chain`, `long-chain` |
+| a line waiting for its node to scale in drawing in full, so the stretch already painted vanishes and draws again | `chain`, `first-chain`, `long-chain` |
+| a chained reply's node scaling in apart from the thread while the line to it waits or catches up | `chain`, `first-chain`, `long-chain` |

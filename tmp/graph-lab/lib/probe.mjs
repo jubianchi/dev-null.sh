@@ -190,16 +190,28 @@ export function installProbe() {
             const node = nodes.find(({ centre }) => Math.hypot(centre.x - start.x, centre.y - start.y) < 1.5);
             if (!node) continue;
             const key = nodeKey(node.element);
-            painted.set(key, [...(painted.get(key) ?? []), { start, points: pointsAlong(path, 0, 1 - hiddenOf(path)) }]);
+            painted.set(key, [...(painted.get(key) ?? []), { d: path.getAttribute('d'), start, points: pointsAlong(path, 0, 1 - hiddenOf(path)) }]);
         }
         return painted;
     };
 
-    // How many px of a line drawing itself in are hidden where a line from the same node, which hasn't moved, was painted.
-    const repaintedLength = (path, hidden, nodes, painted) => {
+    // The lines painted from the same node, which hasn't moved, and from the same place as a line.
+    const paintedBefore = (path, nodes, painted) => {
         const start = path.getPointAtLength(0);
         const node = nodes.find(({ centre }) => Math.hypot(centre.x - start.x, centre.y - start.y) < 1.5);
-        const before = node ? (painted.get(nodeKey(node.element)) ?? []).filter((line) => Math.hypot(line.start.x - start.x, line.start.y - start.y) < 1) : [];
+        return node ? (painted.get(nodeKey(node.element)) ?? []).filter((line) => Math.hypot(line.start.x - start.x, line.start.y - start.y) < 1) : [];
+    };
+
+    // Whether a line takes over another one that just left its node, like the line to a reply chained under the last
+    // commit. By where it starts: the page can render the node again as a new element as the new commit comes in.
+    const takesOver = (path, painted) => {
+        const start = path.getPointAtLength(0);
+        return [...painted.values()].flat().some((line) => line.d !== path.getAttribute('d') && Math.hypot(line.start.x - start.x, line.start.y - start.y) < 1);
+    };
+
+    // How many px of a line drawing itself in are hidden where a line from the same node, which hasn't moved, was painted.
+    const repaintedLength = (path, hidden, nodes, painted) => {
+        const before = paintedBefore(path, nodes, painted);
         if (before.length === 0) return 0;
         const covered = pointsAlong(path, 1 - hidden, 1).filter((point) =>
             before.some((line) => line.points.some((old) => Math.hypot(old.x - point.x, old.y - point.y) < 1)),
@@ -368,6 +380,8 @@ export function installProbe() {
         const frames = [];
         const baseline = new Set();
         const painted = new Map();
+        // Lines seen taking over one that just left their node.
+        const takingOver = new Set();
         for (const svg of document.querySelectorAll('[data-test="graph-canvas"]')) {
             const { container, box, edges } = readCanvas(svg);
             const nodes = nodesWithCentres(container, box);
@@ -385,7 +399,7 @@ export function installProbe() {
         };
         const sample = () => {
             if (!running) return;
-            const frame = { t: Math.round(performance.now() - startedAt), misaligned: [], lineOverScalingNode: 0, sliding: 0, draws: [], redrawn: [], repainted: [], offscreenDraws: 0, nodeIn: 0 };
+            const frame = { t: Math.round(performance.now() - startedAt), misaligned: [], lineOverScalingNode: 0, sliding: 0, draws: [], redrawn: [], repainted: [], offscreenDraws: 0, nodeIn: 0, apart: [] };
 
             for (const svg of document.querySelectorAll('[data-test="graph-canvas"]')) {
                 const { container, box, circles, edges } = readCanvas(svg);
@@ -413,9 +427,8 @@ export function installProbe() {
                     const hidden = drawPath ? parseFloat(getComputedStyle(drawPath).strokeDashoffset) : 0;
                     hiddenOf.set(path, hidden);
                     if (drawPath) {
-                        const key = edgeKey(path, nodes);
-                        frame.draws.push({ d, key, hidden: Math.round(hidden * 100) / 100 });
-                        if (hidden > 0.01 && baseline.has(key)) frame.redrawn.push(d);
+                        frame.draws.push({ d, key: edgeKey(path, nodes), hidden: Math.round(hidden * 100) / 100 });
+                        if (hidden > 0.01 && baseline.has(edgeKey(path, nodes))) frame.redrawn.push(d);
                         // A line taking over from one its node already showed, like the line to a "more replies" dot
                         // once the replies load, or the line to a reply chained under the last commit of a thread: the
                         // stretch already painted stays, even while the line waits for a node at its end to scale in.
@@ -426,15 +439,18 @@ export function installProbe() {
                         if (hidden > 0.01 && hidden < 0.99 && (rect.bottom < 0 || rect.top > window.innerHeight)) frame.offscreenDraws++;
                     }
 
+                    const length = path.getTotalLength();
+                    const start = path.getPointAtLength(0);
+                    const end = path.getPointAtLength(length);
+                    const shown = path.getPointAtLength((1 - hidden) * length);
+                    const key = edgeKey(path, nodes);
+                    if (drawPath && takesOver(path, painted.get(svg) ?? new Map())) takingOver.add(key);
+
                     // Still drawing itself in: an end dot popping at a line already drawn is the intended order. A line
                     // shows over a node scaling in when it leaves that node, or when its painted stretch reaches into
-                    // the node as it overshoots; a stretch kept short of it, like the one a chained reply takes over,
-                    // doesn't.
-                    if (drawPath && hidden > 0.1 && hidden < 0.99) {
-                        const length = path.getTotalLength();
-                        const start = path.getPointAtLength(0);
-                        const end = path.getPointAtLength(length);
-                        const shown = path.getPointAtLength((1 - hidden) * length);
+                    // the node as it overshoots. A line taking over one that just left, like the one to a chained
+                    // reply, draws on to its node as it scales in, so the node never stands apart from the thread.
+                    if (drawPath && hidden > 0.1 && hidden < 0.99 && !takingOver.has(key)) {
                         for (const { element: node } of expectedNodes(container, { strictOnly: true })) {
                             const animation = nodeInAnimation(node, container);
                             if (!animation || animation.isWaiting) continue;
@@ -444,6 +460,18 @@ export function installProbe() {
                             const reaches = Math.hypot(end.x - centre.x, end.y - centre.y) < 12 && Math.hypot(shown.x - centre.x, shown.y - centre.y) < reach;
                             if (leaves || reaches) frame.lineOverScalingNode++;
                         }
+                    }
+
+                    // A node scaling in at the end of a line, once it shows, with the line's painted end short of it.
+                    for (const { element: node } of expectedNodes(container, { strictOnly: true })) {
+                        const animation = nodeInAnimation(node, container);
+                        if (!animation || animation.isWaiting) continue;
+                        const centre = centreOf(node, box);
+                        if (Math.hypot(end.x - centre.x, end.y - centre.y) >= 12) continue;
+                        const radius = node.getBoundingClientRect().width / 2;
+                        if (radius < node.offsetWidth * 0.15) continue;
+                        const gap = Math.hypot(shown.x - centre.x, shown.y - centre.y) - radius;
+                        if (gap > 3) frame.apart.push(`${d} (${Math.round(gap)}px apart)`);
                     }
                 }
                 // What the next frame's lines take over from: what this frame painted.

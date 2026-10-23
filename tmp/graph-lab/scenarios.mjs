@@ -64,6 +64,13 @@ const serverMarkup = (html) => {
 
 const unique = (label) => `glab ${label} ${Date.now()}`;
 
+// A commit chained under the last one of a thread scales in at the end of the line it takes over, which draws on to it
+// meanwhile: once it shows, it never stands apart from the thread.
+const checkJoined = (lab, label, frames) => {
+    const apart = [...new Set(frames.flatMap((frame) => frame.apart))];
+    lab.check(`${label}: the new commit never shows apart from the thread`, apart.length === 0, apart.slice(0, 4));
+};
+
 const pagesOf = (fixture) => [
     { name: 'following', path: '/log/following' },
     { name: 'latest', path: '/log/latest' },
@@ -619,7 +626,40 @@ export const scenarios = [
                 { duration: 3500, film: 'chained reply' },
             );
             checkFrames(lab, 'chained reply', frames);
+            checkJoined(lab, 'chained reply', frames);
             await lab.audit(page, 'after the chained reply');
+        },
+    },
+    {
+        name: 'first-chain',
+        title: 'Replying to oneself twice under a commit of its own: each new commit scales in on the line to it',
+        async run(lab) {
+            const context = await lab.as(cast.starter);
+            const body = unique('first chain');
+            const root = await postCommit(context, cast.starter, body);
+            await new Promise((resolve) => setTimeout(resolve, 3000));
+            const page = await context.newPage();
+            await page.goto(`/@${cast.starter}/commits/${root}`);
+            await lab.settle(page);
+            for (const index of [1, 2]) {
+                const label = `reply ${index}`;
+                await page.locator('[data-test="commit"]').last().getByRole('button', { name: /^Reply/ }).first().click();
+                await page.waitForTimeout(300);
+                const frames = await lab.record(
+                    page,
+                    async () => {
+                        await page.locator('textarea').last().click();
+                        await page.keyboard.type(`${body} ${index}`);
+                        await page.keyboard.press('Meta+Enter');
+                    },
+                    { duration: 3500, film: label },
+                );
+                checkFrames(lab, label, frames);
+                checkJoined(lab, label, frames);
+                await lab.audit(page, `after ${label}`);
+                // The unique CheckUserLevel job's lock again (see `chain`).
+                await page.waitForTimeout(3000);
+            }
         },
     },
     {
@@ -651,6 +691,7 @@ export const scenarios = [
                 { duration: 3500, film: 'chained reply' },
             );
             checkFrames(lab, 'chained reply', frames);
+            checkJoined(lab, 'chained reply', frames);
             await lab.audit(page, 'after the chained reply');
             lab.check(
                 'after the chained reply: the last commit ends on its dot',
