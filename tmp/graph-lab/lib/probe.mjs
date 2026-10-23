@@ -588,6 +588,10 @@ export function installProbe() {
             const { box, circles, edges } = readCanvas(svg);
             if (!hasDrawn(svg)) continue;
             const page = { x: box.left + window.scrollX, y: box.top + window.scrollY };
+            // The canvas clips itself to the viewport (upstream's fix for Gecko's view transitions): what it cuts off
+            // isn't painted on a full-page screenshot.
+            const inset = getComputedStyle(svg).clipPath.match(/^inset\(([\d.]+)px(?: [\d.]+px)?(?: ([\d.]+)px)?/);
+            const shown = inset ? { top: Number(inset[1]), bottom: box.height - Number(inset[2] ?? inset[1]) } : { top: -Infinity, bottom: Infinity };
             for (const { path, d } of edges) {
                 const length = path.getTotalLength();
                 const start = path.getPointAtLength(0);
@@ -602,6 +606,7 @@ export function installProbe() {
                     if (circles.some((c) => Math.hypot(point.x - c.x, point.y - c.y) < c.r + 3)) continue;
                     if (startsOnLine && at < 16) continue;
                     if (covered(page.x + point.x, page.y + point.y)) continue;
+                    if (point.y < shown.top + 2 || point.y > shown.bottom - 2) continue;
                     const ahead = path.getPointAtLength(Math.min(length, at + 1));
                     const tx = ahead.x - point.x;
                     const ty = ahead.y - point.y;

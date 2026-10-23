@@ -50,7 +50,7 @@ On every page, and after every action (`audit`):
 - no line keeps its draw mask once it has drawn;
 - **pixels**: on the screenshot, each line is actually painted (its lane, blended at its opacity over the background
   beside it) along at least 80% of its length, 30% for a dashed line. Points under a fixed or sticky bar, near a node or
-  a junction, past Chrome's 16,384 px capture height, or where the lane blends into the background are left out. This
+  a junction, outside the viewport the canvas clips itself to, past Chrome's 16,384 px capture height, or where the lane blends into the background are left out. This
   is what catches a graph hidden under a card, or a mask that doesn't render.
 
 During every scenario: **no console error or warning**, including errors the browser reports on the window without
