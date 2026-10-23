@@ -71,6 +71,26 @@ const checkJoined = (lab, label, frames) => {
     lab.check(`${label}: the new commit never shows apart from the thread`, apart.length === 0, apart.slice(0, 4));
 };
 
+// The trunk lands on a commit chained under the last one of a thread right as the commit's body ends fading in. The
+// trunk is the line that draws on from a stretch already painted, so it starts partly shown.
+const checkLanding = (lab, label, frames) => {
+    const start = new Map();
+    for (const frame of frames) for (const { d, hidden } of frame.draws) if (!start.has(d)) start.set(d, hidden);
+    const trunk = [...start].find(([, hidden]) => hidden > 0.01 && hidden < 0.95)?.[0];
+    // Landed once fully shown, or once its mask is gone, as the last frame of its draw can fall short of its end.
+    const from = frames.findIndex((frame) => frame.draws.some(({ d }) => d === trunk));
+    const landed = from === -1 ? undefined : frames.slice(from).find((frame) => !frame.draws.some(({ d, hidden }) => d === trunk && hidden > 0.01));
+    // From the new commit's body showing up faded, as one chained before is there in full until then.
+    const fadesFrom = frames.findIndex((frame) => frame.fade !== null && frame.fade < 0.5);
+    const faded = fadesFrom === -1 ? undefined : frames.slice(fadesFrom).find((frame) => frame.fade >= 0.99);
+    const gap = landed && faded ? landed.t - faded.t : null;
+    lab.check(
+        `${label}: the trunk lands on the new commit as its body ends fading in`,
+        gap !== null && Math.abs(gap) <= 34,
+        gap === null ? `trunk ${landed ? 'lands' : 'never lands'}, body ${faded ? 'fades in' : 'never fades in'}` : `${gap > 0 ? 'lands' : 'fades in'} ${Math.abs(gap)}ms after`,
+    );
+};
+
 const pagesOf = (fixture) => [
     { name: 'following', path: '/log/following' },
     { name: 'latest', path: '/log/latest' },
@@ -627,6 +647,7 @@ export const scenarios = [
             );
             checkFrames(lab, 'chained reply', frames);
             checkJoined(lab, 'chained reply', frames);
+            checkLanding(lab, 'chained reply', frames);
             await lab.audit(page, 'after the chained reply');
         },
     },
@@ -656,6 +677,7 @@ export const scenarios = [
                 );
                 checkFrames(lab, label, frames);
                 checkJoined(lab, label, frames);
+                checkLanding(lab, label, frames);
                 await lab.audit(page, `after ${label}`);
                 // The unique CheckUserLevel job's lock again (see `chain`).
                 await page.waitForTimeout(3000);
@@ -693,6 +715,7 @@ export const scenarios = [
             );
             checkFrames(lab, 'going on', frames);
             checkJoined(lab, 'going on', frames);
+            checkLanding(lab, 'going on', frames);
             // The only new lines run down the trunk: a line turning to a reply is a branch already there drawing again.
             const redrawn = [...new Set(frames.flatMap((frame) => frame.draws).filter(({ d, hidden }) => hidden > 0.01 && / H [\d.]+$/.test(d)).map(({ d }) => d))];
             lab.check('going on: the branches to the replies already there stay drawn', redrawn.length === 0, redrawn.slice(0, 4));
@@ -729,6 +752,7 @@ export const scenarios = [
             );
             checkFrames(lab, 'chained reply', frames);
             checkJoined(lab, 'chained reply', frames);
+            checkLanding(lab, 'chained reply', frames);
             await lab.audit(page, 'after the chained reply');
             lab.check(
                 'after the chained reply: the last commit ends on its dot',

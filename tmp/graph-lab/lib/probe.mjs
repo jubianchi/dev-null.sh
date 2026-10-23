@@ -79,6 +79,8 @@ export function installProbe() {
         const loose = new Set();
         for (const anchor of container.querySelectorAll('[class*="group/rail-node"]')) {
             if (anchor.closest('[role="status"]')) continue;
+            // An end dot scaling out as the thread goes on below it has left the canvas already.
+            if (anchor.dataset.graphLeaves !== undefined) continue;
             // A card measures its node's link, which a grouped dot shifts up inside the anchor.
             const link = anchor.querySelector('a[class*="rounded-full"]');
             const target = link && isVisible(link) ? link : isRound(anchor) && isVisible(anchor) ? anchor : null;
@@ -209,9 +211,10 @@ export function installProbe() {
         return [...painted.values()].flat().some((line) => line.d !== path.getAttribute('d') && Math.hypot(line.start.x - start.x, line.start.y - start.y) < 1);
     };
 
-    // How many px of a line drawing itself in are hidden where a line from the same node, which hasn't moved, was painted.
-    const repaintedLength = (path, hidden, nodes, painted) => {
-        const before = paintedBefore(path, nodes, painted);
+    // How many px of a line drawing itself in are hidden where a line from the same node, which hasn't moved, was painted
+    // and has since left. One still there, like the dashed column a trunk draws itself over, still shows.
+    const repaintedLength = (path, hidden, nodes, painted, present) => {
+        const before = paintedBefore(path, nodes, painted).filter((line) => !present.has(line.d));
         if (before.length === 0) return 0;
         const covered = pointsAlong(path, 1 - hidden, 1).filter((point) =>
             before.some((line) => line.points.some((old) => Math.hypot(old.x - point.x, old.y - point.y) < 1)),
@@ -432,7 +435,7 @@ export function installProbe() {
                         // A line taking over from one its node already showed, like the line to a "more replies" dot
                         // once the replies load, or the line to a reply chained under the last commit of a thread: the
                         // stretch already painted stays, even while the line waits for a node at its end to scale in.
-                        const repainted = hidden > 0.01 ? repaintedLength(path, hidden, nodes, painted.get(svg) ?? new Map()) : 0;
+                        const repainted = hidden > 0.01 ? repaintedLength(path, hidden, nodes, painted.get(svg) ?? new Map(), new Set(edges.map(({ d: other }) => other))) : 0;
                         if (repainted > 4) frame.repainted.push(`${d} (${repainted}px)`);
                         // Drawing a line nobody can see is wasted work.
                         const rect = path.getBoundingClientRect();
@@ -462,7 +465,9 @@ export function installProbe() {
                         }
                     }
 
-                    // A node scaling in at the end of a line, once it shows, with the line's painted end short of it.
+                    // A node scaling in at the end of a line, once it shows, with the line's painted end short of it. From
+                    // where the line ends, where the node settles: a dot off its anchor's centre, like a grouped commit's,
+                    // drifts there as its anchor scales in.
                     for (const { element: node } of expectedNodes(container, { strictOnly: true })) {
                         const animation = nodeInAnimation(node, container);
                         if (!animation || animation.isWaiting) continue;
@@ -470,13 +475,18 @@ export function installProbe() {
                         if (Math.hypot(end.x - centre.x, end.y - centre.y) >= 12) continue;
                         const radius = node.getBoundingClientRect().width / 2;
                         if (radius < node.offsetWidth * 0.15) continue;
-                        const gap = Math.hypot(shown.x - centre.x, shown.y - centre.y) - radius;
+                        const gap = Math.hypot(shown.x - end.x, shown.y - end.y) - radius;
                         if (gap > 3) frame.apart.push(`${d} (${Math.round(gap)}px apart)`);
                     }
                 }
                 // What the next frame's lines take over from: what this frame painted.
                 painted.set(svg, paintedLines(edges, nodes, (path) => hiddenOf.get(path) ?? 0));
             }
+
+            // A commit's body fading in, as a commit chained under the last one of a thread comes in: the last one, as the
+            // ones chained before keep their class once faded in.
+            const fading = [...document.querySelectorAll('[class*="animate-commit-in"]')].at(-1);
+            frame.fade = fading ? Number(getComputedStyle(fading).opacity) : null;
 
             // The card whose body holds the watched text, once it shows up.
             const watched = watch ? [...document.querySelectorAll('[data-test="commit"]')].find((card) => card.textContent.includes(watch)) : null;
