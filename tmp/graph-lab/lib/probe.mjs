@@ -601,7 +601,10 @@ export function installProbe() {
                 const to = from;
                 const opacity = Number(path.getAttribute('opacity') ?? 1);
                 const samples = [];
-                for (let at = 2; at < length - 2; at += 4) {
+                // Samples fall halfway along each dash and each gap: a line picking its dashes up further along, like a
+                // branch carrying on its parent's column, would otherwise have every sample on the edge of a dash.
+                const offset = Number(path.getAttribute('stroke-dashoffset') ?? 0);
+                for (let at = 2 + ((((-offset) % 4) + 4) % 4); at < length - 2; at += 4) {
                     const point = path.getPointAtLength(at);
                     if (circles.some((c) => Math.hypot(point.x - c.x, point.y - c.y) < c.r + 3)) continue;
                     if (startsOnLine && at < 16) continue;
