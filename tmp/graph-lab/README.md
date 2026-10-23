@@ -197,3 +197,4 @@ Each bug fixed during the rework, put back by hand, fails the lab:
 | a console warning | every scenario (console check) |
 | measuring synchronously on a resize observer's first report (loop error when navigating) | `navigate` |
 | the same commit registered twice, as a card and as a quote under another card | `quote` |
+| a line waiting for its node to scale in drawing in full, so the stretch already painted vanishes and draws again | `chain`, `long-chain` |

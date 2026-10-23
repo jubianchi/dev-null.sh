@@ -183,14 +183,14 @@ export function installProbe() {
     };
 
     // What each node's lines painted before an action, by the node they leave and where it stood.
-    const paintedLines = (edges, nodes) => {
+    const paintedLines = (edges, nodes, hiddenOf = () => 0) => {
         const painted = new Map();
         for (const { path } of edges) {
             const start = path.getPointAtLength(0);
             const node = nodes.find(({ centre }) => Math.hypot(centre.x - start.x, centre.y - start.y) < 1.5);
             if (!node) continue;
             const key = nodeKey(node.element);
-            painted.set(key, [...(painted.get(key) ?? []), { start, points: pointsAlong(path) }]);
+            painted.set(key, [...(painted.get(key) ?? []), { start, points: pointsAlong(path, 0, 1 - hiddenOf(path)) }]);
         }
         return painted;
     };
@@ -368,8 +368,6 @@ export function installProbe() {
         const frames = [];
         const baseline = new Set();
         const painted = new Map();
-        // Lines that had a node scaling in at one end during the recording.
-        const scaledIn = new Set();
         for (const svg of document.querySelectorAll('[data-test="graph-canvas"]')) {
             const { container, box, edges } = readCanvas(svg);
             const nodes = nodesWithCentres(container, box);
@@ -406,45 +404,50 @@ export function installProbe() {
                     if (!circle || circle.r < node.offsetWidth / 2 - 0.5) frame.misaligned.push(describe(node));
                 }
 
+                const hiddenOf = new Map();
                 for (const { path, d } of edges) {
                     if (path.getAnimations().some((animation) => animation.transitionProperty === 'd')) frame.sliding++;
 
                     const mask = path.getAttribute('mask');
                     const drawPath = mask ? document.getElementById(mask.slice(5, -1).replace(/^#/, ''))?.querySelector('path') : null;
                     const hidden = drawPath ? parseFloat(getComputedStyle(drawPath).strokeDashoffset) : 0;
+                    hiddenOf.set(path, hidden);
                     if (drawPath) {
                         const key = edgeKey(path, nodes);
                         frame.draws.push({ d, key, hidden: Math.round(hidden * 100) / 100 });
                         if (hidden > 0.01 && baseline.has(key)) frame.redrawn.push(d);
                         // A line taking over from one its node already showed, like the line to a "more replies" dot
-                        // once the replies load: the stretch already painted stays. One waiting for a node at its end to
-                        // scale in, like a reply just posted, draws in full after it instead.
-                        const length = path.getTotalLength();
-                        const ends = [path.getPointAtLength(0), path.getPointAtLength(length)];
-                        const waitsForNode = expectedNodes(container, { strictOnly: true }).some(({ element: node }) => {
-                            const centre = centreOf(node, box);
-                            return nodeInAnimation(node, container) && ends.some((end) => Math.hypot(end.x - centre.x, end.y - centre.y) < 12);
-                        });
-                        if (waitsForNode) scaledIn.add(key);
-                        const repainted = hidden > 0.01 && !scaledIn.has(key) ? repaintedLength(path, hidden, nodes, painted.get(svg) ?? new Map()) : 0;
+                        // once the replies load, or the line to a reply chained under the last commit of a thread: the
+                        // stretch already painted stays, even while the line waits for a node at its end to scale in.
+                        const repainted = hidden > 0.01 ? repaintedLength(path, hidden, nodes, painted.get(svg) ?? new Map()) : 0;
                         if (repainted > 4) frame.repainted.push(`${d} (${repainted}px)`);
                         // Drawing a line nobody can see is wasted work.
                         const rect = path.getBoundingClientRect();
                         if (hidden > 0.01 && hidden < 0.99 && (rect.bottom < 0 || rect.top > window.innerHeight)) frame.offscreenDraws++;
                     }
 
-                    // Still drawing itself in: an end dot popping at a line already drawn is the intended order.
+                    // Still drawing itself in: an end dot popping at a line already drawn is the intended order. A line
+                    // shows over a node scaling in when it leaves that node, or when its painted stretch reaches into
+                    // the node as it overshoots; a stretch kept short of it, like the one a chained reply takes over,
+                    // doesn't.
                     if (drawPath && hidden > 0.1 && hidden < 0.99) {
                         const length = path.getTotalLength();
-                        const ends = [path.getPointAtLength(0), path.getPointAtLength(length)];
+                        const start = path.getPointAtLength(0);
+                        const end = path.getPointAtLength(length);
+                        const shown = path.getPointAtLength((1 - hidden) * length);
                         for (const { element: node } of expectedNodes(container, { strictOnly: true })) {
                             const animation = nodeInAnimation(node, container);
                             if (!animation || animation.isWaiting) continue;
                             const centre = centreOf(node, box);
-                            if (ends.some((end) => Math.hypot(end.x - centre.x, end.y - centre.y) < 12)) frame.lineOverScalingNode++;
+                            const reach = node.getBoundingClientRect().width / 2 + 2;
+                            const leaves = Math.hypot(start.x - centre.x, start.y - centre.y) < 12;
+                            const reaches = Math.hypot(end.x - centre.x, end.y - centre.y) < 12 && Math.hypot(shown.x - centre.x, shown.y - centre.y) < reach;
+                            if (leaves || reaches) frame.lineOverScalingNode++;
                         }
                     }
                 }
+                // What the next frame's lines take over from: what this frame painted.
+                painted.set(svg, paintedLines(edges, nodes, (path) => hiddenOf.get(path) ?? 0));
             }
 
             // The card whose body holds the watched text, once it shows up.
