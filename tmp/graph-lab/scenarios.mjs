@@ -474,17 +474,28 @@ export const scenarios = [
     },
     {
         name: 'arrival',
-        title: 'A commit from someone else arriving through the "new commits" button',
+        // At the top of the log, new commits load on their own on the next check, every 30 seconds (#1099): the "new
+        // commits" control only shows to a reader who has scrolled down.
+        title: 'A commit from someone else arriving at the top of the log on its own',
         slow: true,
         async run(lab) {
             const page = await lab.open(cast.author, '/log/following');
             const peer = await lab.as(cast.peer);
-            await postCommit(peer, cast.peer, unique('arrival'));
-            const button = page.getByRole('button', { name: /new commits?$/ });
-            const appeared = await button.waitFor({ timeout: 40_000 }).then(() => true, () => false);
-            if (!lab.check('the "new commits" button shows up within 40s', appeared)) return;
+            const body = unique('arrival');
+            await postCommit(peer, cast.peer, body);
             const before = await lab.edgeCount(page);
-            const frames = await lab.record(page, () => button.click(), { duration: 3000, film: 'arrival' });
+            let appeared = false;
+            const frames = await lab.record(
+                page,
+                async () => {
+                    appeared = await page
+                        .locator('[data-test="commit"]', { hasText: body })
+                        .waitFor({ timeout: 40_000 })
+                        .then(() => true, () => false);
+                },
+                { watch: body, duration: 3000, film: 'arrival' },
+            );
+            if (!lab.check('the new commit shows up at the top within 40s', appeared)) return;
             const added = (await lab.edgeCount(page)) - before;
             checkFrames(lab, 'arrival', frames);
             lab.check(`arrival: the new card's line draws in`, drawnLines(frames) >= 1, `${drawnLines(frames)} drawn, ${added} added`);
