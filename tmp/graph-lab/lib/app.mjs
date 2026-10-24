@@ -14,11 +14,13 @@ export async function signIn(
     browser,
     base,
     username,
-    { viewport = viewports.desktop, colorScheme = 'light', javaScriptEnabled = true, reducedMotion = 'no-preference' } = {},
+    { viewport = viewports.desktop, colorScheme = 'light', javaScriptEnabled = true, reducedMotion = 'no-preference', timezoneId, locale } = {},
 ) {
-    const context = await browser.newContext({ baseURL: base, viewport, colorScheme, javaScriptEnabled, reducedMotion, deviceScaleFactor: 2 });
+    const context = await browser.newContext({ baseURL: base, viewport, colorScheme, javaScriptEnabled, reducedMotion, deviceScaleFactor: 2, timezoneId, locale });
     await context.addInitScript(installProbe);
     await context.request.get('/');
+    // A guest only gets the session cookies.
+    if (username === null) return context;
     await context.request.post('/login/local', {
         headers: { 'X-XSRF-TOKEN': await xsrf(context), 'X-Inertia': 'true' },
         data: { username },

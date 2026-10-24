@@ -133,6 +133,79 @@ export const scenarios = [
         },
     },
     {
+        name: 'hydration',
+        title: "Server rendering: the client hydrates the server's page without a mismatch, wherever the browser is",
+        slow: true,
+        async run(lab, { log }) {
+            // The browser sits far from the SSR server, in time and in language, as most readers do.
+            const away = { timezoneId: 'Pacific/Auckland', locale: 'fr-FR' };
+            const hydrationProblem = /hydrat|#418|#419|#423|#425|did(n't| not) match/i;
+            const checkHydrated = async (page, label, consoleBefore) => {
+                const replaced = await page.evaluate(() => window.__glabServerCardsReplaced ?? 0);
+                lab.check(`${label}: the client keeps the server's cards`, replaced === 0, `${replaced} server cards replaced by a fresh render`);
+                const problems = lab
+                    .consoleProblems()
+                    .slice(consoleBefore)
+                    .filter((message) => hydrationProblem.test(message.text));
+                // React's message ends on a diff of the tree: "+" for the client, "-" for the server.
+                const diffOf = (text) =>
+                    text
+                        .split('\n')
+                        .filter((line) => /^\s*[+-]\s/.test(line))
+                        .map((line) => line.trim().slice(0, 160))
+                        .slice(0, 8);
+                lab.check(
+                    `${label}: hydration without mismatch`,
+                    problems.length === 0,
+                    problems.slice(0, 3).flatMap((message) => [message.text.split('\n')[0].slice(0, 120), ...diffOf(message.text)]),
+                );
+            };
+            await withSsr(
+                log,
+                async () => {
+                    for (const [variant, options, username] of [
+                        ['desktop', { viewport: viewports.desktop }, cast.author],
+                        ['mobile', { viewport: viewports.mobile }, cast.author],
+                        ['dark', { viewport: viewports.desktop, colorScheme: 'dark' }, cast.author],
+                        ['guest', { viewport: viewports.desktop }, null],
+                    ]) {
+                        const context = await lab.as(username, { ...options, ...away });
+                        await context.addInitScript(() => window.__glab.startHandoff());
+                        const page = await context.newPage();
+                        // A first visit: the server doesn't know the reader's clock yet, so the client renders afresh,
+                        // without a mismatch, and leaves its clock for the next pages.
+                        const firstBefore = lab.consoleProblems().length;
+                        await page.goto(`/@${cast.author}`);
+                        await lab.settle(page);
+                        const fresh = await page.evaluate(() => window.__glabServerCardsReplaced ?? 0);
+                        lab.check(`first visit (${variant}): the client renders afresh, the server not knowing its clock yet`, fresh > 0, `${fresh} server cards replaced`);
+                        const firstProblems = lab
+                            .consoleProblems()
+                            .slice(firstBefore)
+                            .filter((message) => hydrationProblem.test(message.text));
+                        lab.check(`first visit (${variant}): no hydration attempted`, firstProblems.length === 0, firstProblems.slice(0, 2).map((message) => message.text.slice(0, 160)));
+                        for (const { name, path, expand } of pagesOf(lab.fixture)) {
+                            if (username === null && ['following', 'notifications'].includes(name)) continue;
+                            const label = `${name} (${variant})`;
+                            let consoleBefore = lab.consoleProblems().length;
+                            await page.goto(path);
+                            await lab.settle(page);
+                            await checkHydrated(page, label, consoleBefore);
+                            if (!expand) continue;
+                            // Open threads are remembered in the history entry, which a reload brings back.
+                            await lab.expandReplies(page);
+                            consoleBefore = lab.consoleProblems().length;
+                            await page.reload();
+                            await lab.settle(page);
+                            await checkHydrated(page, `${label}, reloaded with its replies open`, consoleBefore);
+                        }
+                    }
+                },
+                { development: true, timezone: 'UTC' },
+            );
+        },
+    },
+    {
         name: 'reduced',
         title: 'With reduced motion, nothing animates and everything shows in its final state',
         async run(lab) {

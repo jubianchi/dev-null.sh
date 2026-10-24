@@ -74,6 +74,7 @@ Frame by frame during animations (`checkFrames`):
 | Name | What it does |
 |---|---|
 | `static` | audits 9 pages (feeds, profile, profile replies, threads, notifications) on desktop, mobile and dark |
+| `hydration` | server rendering with React's development bundles (the only ones that report attribute mismatches), the SSR server in UTC and the browser in Auckland and in French: a first visit renders afresh, the server not knowing the reader's clock yet; then, on desktop, mobile, dark and as a guest, every page and every thread reloaded with its replies open keeps the server's cards (hydrated, not rendered again) without a hydration mismatch. A mismatch shows React's diff of the tree |
 | `ssr` | server rendering: the HTML holds the cards, no rail piece and an empty canvas; no frame ever shows a rail piece, and the canvas draws the graph once the client has rendered (the delay after the cards first show is in the check's name) |
 | `reduced` | reduced motion: nothing animates, every line, avatar and dot shows in its final state right away |
 | `expand` | opens collapsed replies |

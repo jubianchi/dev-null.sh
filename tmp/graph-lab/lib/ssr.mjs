@@ -31,17 +31,23 @@ const health = () =>
         .then((response) => response.ok)
         .catch(() => false);
 
-export async function withSsr(log, run) {
+/**
+ * Runs `run` with the dev server rendering on the server. `development` builds React's development bundles, the only
+ * ones that tell which attributes differ between the server's HTML and the client; `timezone` sets the SSR server's,
+ * which a browser elsewhere in the world doesn't share.
+ */
+export async function withSsr(log, run, { development = false, timezone } = {}) {
     healHotFile(log);
     if (!existsSync(hot)) throw new Error('public/hot is missing: start the Vite dev server (php artisan dev) first');
     if (await health()) throw new Error('an SSR server already runs on port 13714: stop it first (php artisan inertia:stop-ssr)');
 
     const hadBundle = existsSync(bundle);
-    log('building the client and SSR bundles');
-    execFileSync('vp', ['build'], { env, stdio: 'pipe' });
-    execFileSync('vp', ['build', '--ssr'], { env, stdio: 'pipe' });
+    const buildEnv = development ? { ...env, NODE_ENV: 'development' } : env;
+    log(`building the client and SSR bundles${development ? ' for development' : ''}`);
+    execFileSync('vp', ['build'], { env: buildEnv, stdio: 'pipe' });
+    execFileSync('vp', ['build', '--ssr'], { env: buildEnv, stdio: 'pipe' });
 
-    const server = spawn(php, ['artisan', 'inertia:start-ssr'], { env, stdio: 'ignore' });
+    const server = spawn(php, ['artisan', 'inertia:start-ssr'], { env: { ...buildEnv, ...(timezone && { TZ: timezone }) }, stdio: 'ignore' });
     const restore = () => {
         if (existsSync(parked)) renameSync(parked, hot);
         try {
