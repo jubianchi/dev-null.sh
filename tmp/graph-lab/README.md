@@ -74,8 +74,7 @@ Frame by frame during animations (`checkFrames`):
 | Name | What it does |
 |---|---|
 | `static` | audits 9 pages (feeds, profile, profile replies, threads, notifications) on desktop, mobile and dark |
-| `ssr` | server rendering: the HTML holds the rail and an empty canvas, the page without JavaScript shows the rail, the first client frame shows the rail, no frame shows neither or both, then the canvas takes over |
-| `handover` | server rendering, as in production: holds the app's bundles back to capture the server's page as it first shows, rail included, then lets the client take over and compares the two screenshots wherever a rail piece or a canvas line sits, on the first screen (made tall), on desktop, mobile and dark. As an eye would: the ink, the line's width, its colour and its dashes' length must stay, like a shoulder the rail drew thinner, while where the dashes start may shift (a line split in pieces can't match one drawn in a single path). Nodes are left out, both sides draw them alike. Cards that move because the client fills in deferred content (who to follow) end the comparison there |
+| `ssr` | server rendering: the HTML holds the cards, no rail piece and an empty canvas; no frame ever shows a rail piece, and the canvas draws the graph once the client has rendered (the delay after the cards first show is in the check's name) |
 | `reduced` | reduced motion: nothing animates, every line, avatar and dot shows in its final state right away |
 | `expand` | opens collapsed replies |
 | `more` | loads more replies |
@@ -207,7 +206,7 @@ Each bug fixed during the rework, put back by hand, fails the lab:
 | fresh nodes popping again when a thread opens | `thread-open` |
 | a line drawing while its avatar scales in | `post` |
 | canvas under the cards (geometry right, nothing visible) | `expand` and `static` (pixels) |
-| canvas drawing from the start (no rail in the server's HTML) | `ssr` |
+| rail pieces back in the server's HTML (the fallback before the canvas measures) | `ssr` |
 | draw-in animation despite reduced motion | `reduced` |
 | a console warning | every scenario (console check) |
 | measuring synchronously on a resize observer's first report (loop error when navigating) | `navigate` |

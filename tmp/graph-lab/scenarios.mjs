@@ -1,55 +1,10 @@
 import { cast, deleteCommit, postCommit, postReply, viewports } from './lib/app.mjs';
 import { checkEntrance, checkFrames, drawnLines } from './lib/lab.mjs';
-import { compareRegions } from './lib/pixels.mjs';
 import { withSsr } from './lib/ssr.mjs';
 
+// Rail pieces that used to stand in for the canvas lines on the server: none should show anymore.
 const railPieceNames = ['rail-tail', 'rail-previous', 'commit-reply-spine', 'thread-spine', 'thread-elbow', 'thread-column', 'reply-link', 'reply-tail'];
 const railPiecesPattern = new RegExp(`data-test="(${railPieceNames.join('|')})"`, 'g');
-const railPieces = railPieceNames.map((name) => `[data-test="${name}"]`).join(',');
-
-/**
- * What the viewport shows of the graph: where the cards sit, and the boxes of the rail pieces or the canvas lines,
- * padded a little and named after the card around them.
- */
-const graphBoxes = (page, selector) =>
-    page.evaluate((selector) => {
-        const onScreen = (element) => {
-            const rect = element.getBoundingClientRect();
-            return rect.bottom > 0 && rect.top < window.innerHeight;
-        };
-        const nameOf = (element) => {
-            const card = element.closest('[data-test="reply"], [data-test="commit"]');
-            return card?.querySelector('a[href^="/@"]')?.textContent?.trim() || card?.textContent?.trim().slice(0, 30) || 'page';
-        };
-        const box = (element, kind) => {
-            const rect = element.getBoundingClientRect();
-            return { kind, name: nameOf(element), left: rect.left - 3, right: rect.right + 3, top: rect.top + window.scrollY - 3, bottom: rect.bottom + window.scrollY + 3 };
-        };
-        const canvasLines = [...document.querySelectorAll('[data-test="graph-canvas"] > g path')].filter(onScreen);
-        // The nodes the canvas cuts out of its lines: avatars and dots, which both sides draw alike.
-        const nodes = [...document.querySelectorAll('[data-test="graph-canvas"]')].flatMap((svg) => {
-            const origin = svg.getBoundingClientRect();
-            return [...svg.querySelectorAll('mask[id$="-nodes"] circle')].map((circle) => ({
-                x: origin.left + Number(circle.getAttribute('cx')),
-                y: origin.top + window.scrollY + Number(circle.getAttribute('cy')),
-                r: Number(circle.getAttribute('r')) + 1,
-            }));
-        });
-        return {
-            nodes,
-            layout: [...document.querySelectorAll('[data-test="commit"], [data-test="reply"]')].filter(onScreen).map((card) => Math.round(card.getBoundingClientRect().top)),
-            boxes: [
-                // The elbow is an SVG element, which has no offset size.
-                ...[...document.querySelectorAll(selector)]
-                    .filter((element) => {
-                        const rect = element.getBoundingClientRect();
-                        return (rect.width || rect.height) && onScreen(element);
-                    })
-                    .map((element) => box(element, element.dataset.test)),
-                ...canvasLines.map((path) => box(path, path.dataset.test)),
-            ],
-        };
-    }, selector);
 
 /** What the server sent: cards, rail pieces, and canvas lines (none expected before the browser measures). */
 const serverMarkup = (html) => {
@@ -126,7 +81,7 @@ export const scenarios = [
     },
     {
         name: 'ssr',
-        title: 'Server rendering: the rail comes from the server, and the client and canvas take over without a gap',
+        title: 'Server rendering: the server sends no graph, and the canvas draws it once the client has rendered',
         async run(lab, { log }) {
             const pages = [
                 { name: 'following', path: '/log/following' },
@@ -141,17 +96,12 @@ export const scenarios = [
                 for (const { name, path } of pages) {
                     const markup = serverMarkup(await (await reader.request.get(path)).text());
                     lab.check(
-                        `${name}: the server renders ${markup.cards} cards with their rail (${markup.pieces} pieces) and an empty canvas`,
-                        markup.cards > 0 && markup.pieces > 0 && markup.canvases > 0 && markup.lines === 0,
+                        `${name}: the server renders ${markup.cards} cards, no rail piece and an empty canvas`,
+                        markup.cards > 0 && markup.pieces === 0 && markup.canvases > 0 && markup.lines === 0,
                         JSON.stringify(markup),
                     );
 
                     await quietPage.goto(path);
-                    const shown = await quietPage.evaluate(
-                        (selector) => [...document.querySelectorAll(selector)].filter((element) => element.offsetWidth || element.offsetHeight).length,
-                        '[data-test="rail-tail"], [data-test="rail-previous"], [data-test="commit-reply-spine"]',
-                    );
-                    lab.check(`${name}: without JavaScript, ${shown} rail pieces show`, shown > 0);
                     await lab.shot(quietPage, `${name} server only`);
 
                     const context = await lab.as(cast.author);
@@ -160,15 +110,16 @@ export const scenarios = [
                     await page.goto(path);
                     await lab.settle(page, 1500);
                     const frames = (await page.evaluate(() => window.__glabHandoff ?? [])).filter((frame) => frame.cards > 0);
-                    const first = frames[0];
                     const last = frames.at(-1);
-                    const blank = frames.filter((frame) => frame.pieces === 0 && frame.lines === 0);
-                    const both = frames.filter((frame) => frame.pieces > 0 && frame.lines > 0);
+                    const drawn = frames.find((frame) => frame.lines > 0);
+                    const pieces = frames.filter((frame) => frame.pieces > 0);
                     const at = (list) => list.slice(0, 4).map((frame) => `at ${frame.t}ms: ${frame.pieces} pieces, ${frame.lines} lines`);
-                    lab.check(`${name}: the first painted frame shows the server's rail`, first?.pieces > 0, first ? at([first]) : 'no frame with cards');
-                    lab.check(`${name}: no frame shows the cards without any graph`, blank.length === 0, at(blank));
-                    lab.check(`${name}: no frame shows the rail and the canvas lines together`, both.length === 0, at(both));
-                    lab.check(`${name}: the canvas has taken over`, last?.lines > 0 && last?.pieces === 0, last ? at([last]) : []);
+                    lab.check(`${name}: no frame shows a rail piece`, pieces.length === 0, at(pieces));
+                    lab.check(
+                        `${name}: the canvas draws the graph ${drawn ? `${drawn.t - frames[0].t}ms after the cards first show` : ''}`,
+                        last?.lines > 0,
+                        last ? at([last]) : 'no frame with cards',
+                    );
                     if (await page.evaluate(() => window.__glabServerCardsReplaced > 0)) {
                         lab.skip(`${name}: hydration without mismatch`, "the client re-renders the page instead of hydrating it (createRoot in app.tsx), so there's no hydration to check");
                     } else {
@@ -177,67 +128,6 @@ export const scenarios = [
                     }
                     if (name === 'thread-root') await lab.expandReplies(page);
                     await lab.audit(page, `${name} in the browser`);
-                }
-            });
-        },
-    },
-    {
-        name: 'handover',
-        title: "Server rendering: the canvas takes over from the server's rail without changing how the graph looks",
-        async run(lab, { log }) {
-            const pages = [
-                { name: 'latest', path: '/log/latest' },
-                { name: 'thread-root', path: `/@${cast.author}/commits/${lab.fixture.root}` },
-                { name: 'thread-nested', path: `/@${cast.peer}/commits/${lab.fixture.peer1}` },
-                { name: 'profile', path: `/@${cast.author}` },
-                { name: 'profile-replies', path: `/@${cast.author}?tab=replies` },
-                { name: 'notifications', path: '/notifications' },
-            ];
-            // The hand-over happens on the first screen. Cards off screen keep a placeholder height (content-visibility)
-            // until they near it, so only the viewport is compared, made tall to take in more of the graph.
-            const variants = [
-                { variant: 'desktop', viewport: { ...viewports.desktop, height: 2000 } },
-                { variant: 'mobile', viewport: { ...viewports.mobile, height: 1800 } },
-                { variant: 'dark', viewport: { ...viewports.desktop, height: 2000 }, colorScheme: 'dark' },
-            ];
-            await withSsr(log, async () => {
-                for (const { variant, viewport, colorScheme } of variants) {
-                    for (const { name, path } of pages) {
-                        const label = `${name} (${variant})`;
-                        const context = await lab.as(cast.author, { viewport, colorScheme });
-                        const page = await context.newPage();
-                        // The app's bundles wait while the server's page, rail included, is captured as it first shows.
-                        let release;
-                        const held = new Promise((resolve) => (release = resolve));
-                        await page.route('**/build/assets/*.js', async (route) => {
-                            await held;
-                            await route.continue();
-                        });
-                        // Deferred module scripts hold DOMContentLoaded back too: wait for the server's cards instead.
-                        await page.goto(path, { waitUntil: 'commit' });
-                        await page.waitForSelector(railPieces, { state: 'attached', timeout: 10000 }).catch(() => {});
-                        await page.evaluate(() => document.fonts.ready);
-                        await page.waitForTimeout(300);
-                        const rail = { ...(await graphBoxes(page, railPieces)), buffer: await page.screenshot() };
-                        if (!lab.check(`${label}: the server's page shows its rail before the client runs`, rail.boxes.length > 0, `${rail.boxes.length} rail pieces`)) continue;
-                        await lab.shot(page, `${label} rail`, { fullPage: false });
-                        release();
-                        await page.waitForFunction(() => document.querySelectorAll('[data-test="graph-canvas"] > g path').length > 0, null, { timeout: 10000 }).catch(() => {});
-                        await lab.settle(page, 1500);
-                        const canvas = { ...(await graphBoxes(page, railPieces)), buffer: await page.screenshot() };
-                        await lab.shot(page, `${label} canvas`, { fullPage: false });
-                        // Content the client fills in, like who to follow on a mobile feed, can move the cards below it: the
-                        // graph is compared above the first card that moves.
-                        const moved = rail.layout.findIndex((top, index) => top !== canvas.layout[index]);
-                        const cutoff = moved === -1 ? Infinity : Math.min(rail.layout[moved], canvas.layout[moved] ?? Infinity);
-                        if (moved !== -1) lab.skip(`${label}: the graph below y=${cutoff}`, 'the cards there move when the client fills in deferred content, which the graph has no part in');
-                        const changed = compareRegions(rail.buffer, canvas.buffer, [...rail.boxes, ...canvas.boxes].filter((box) => box.top < cutoff), 2, canvas.nodes);
-                        lab.check(
-                            `${label}: the ${rail.boxes.length} rail pieces and the ${canvas.boxes.length} canvas lines look the same`,
-                            canvas.boxes.length > 0 && changed.length === 0,
-                            changed.slice(0, 6).map((box) => `${box.kind} by ${box.name} at ${Math.round(box.left)},${Math.round(box.top)}: ${box.reasons.join(', ')}`),
-                        );
-                    }
                 }
             });
         },
