@@ -137,7 +137,17 @@ metrics (main thread, script, layout and style time, layout counts, long tasks, 
 ```sh
 node tmp/graph-lab/perf.mjs                                  # merge base of HEAD and upstream/production vs HEAD
 node tmp/graph-lab/perf.mjs --before=<ref> --after=<ref> --runs=5 --throttle=4 --keep --reduced-motion
+node tmp/graph-lab/perf.mjs --ssr --before=production --after=HEAD   # rendered on the server, as in production
+node tmp/graph-lab/perf.mjs --ssr --before=production --after=production   # A/A: the noise of each metric
 ```
+
+`--ssr` (or `--ssr=before` / `--ssr=after` for one side only) builds each version's SSR bundle and runs it on a port of
+its own (13801, 13802): the bundle always listens on 13714, which `lib/ssr-port.mjs`, preloaded, replaces. Each Laravel
+server points at its own SSR server with SSR errors thrown, and every page load checks it was served by its version's
+build and, with SSR, rendered on the server. Loads then also report TTFB, HTML size, FCP, the elements in the server's
+HTML (`ServerElements`) and when the first line of the graph shows (`FirstLine`: a rail piece from the server or a line
+from the client, once painted). The `Spread` column is the larger interquartile range of the two sides as a share of
+the median: a change within it is noise.
 
 Results go to `tmp/graph-lab/perf/<date>/` (`report.md`, `results.json`). `--keep` keeps the worktrees and their builds
 for the next run. Run nothing else on the machine meanwhile: background work skews the numbers by tens of percent.

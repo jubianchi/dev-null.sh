@@ -2,7 +2,11 @@
 // Rendering performance, before and after: builds two refs for production in throwaway worktrees, serves them side by
 // side on the same database, and measures the same pages and interactions on each, alternating, with the CPU slowed.
 // Usage: node tmp/graph-lab/perf.mjs [--before=<ref>] [--after=<ref>] [--runs=5] [--throttle=4] [--keep] [--rebuild]
-//        [--reduced-motion]
+//        [--reduced-motion] [--ssr[=both|before|after]]
+//
+// --ssr serves the versions as production does: each one renders on its own SSR server, which loads also measure (time
+// to first byte, HTML size, first lines of the graph). Comparing a ref with itself (--before=X --after=X) tells the
+// noise of each metric.
 
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -31,12 +35,22 @@ const runs = Number(args.runs ?? 5);
 const throttle = Number(args.throttle ?? 4);
 const log = (message) => console.log(`\x1b[2m${message}\x1b[0m`);
 
+const ssrSides = args.ssr === undefined ? [] : args.ssr === 'true' || args.ssr === 'both' ? ['before', 'after'] : [args.ssr];
+
 const versions = [
-    { name: 'before', ref: args.before ?? git('merge-base', 'HEAD', 'upstream/production'), port: 8101 },
-    { name: 'after', ref: args.after ?? 'HEAD', port: 8102 },
+    { name: 'before', ref: args.before ?? git('merge-base', 'HEAD', 'upstream/production'), port: 8101, ssrPort: 13801 },
+    { name: 'after', ref: args.after ?? 'HEAD', port: 8102, ssrPort: 13802 },
 ].map((version) => {
     const sha = git('rev-parse', `${version.ref}^{commit}`);
-    return { ...version, sha, label: `${version.name} (${sha.slice(0, 8)} ${git('log', '-1', '--format=%s', sha).slice(0, 50)})`, dir: join(root, '.claude/worktrees', `graph-lab-perf-${sha.slice(0, 8)}`) };
+    const ssr = ssrSides.includes(version.name);
+    return {
+        ...version,
+        sha,
+        ssr,
+        label: `${version.name} (${sha.slice(0, 8)} ${git('log', '-1', '--format=%s', sha).slice(0, 50)})${ssr ? ', SSR' : ''}`,
+        // Named after the side too, so a ref compared with itself gets two worktrees and two builds.
+        dir: join(root, '.claude/worktrees', `graph-lab-perf-${version.name}-${sha.slice(0, 8)}`),
+    };
 });
 
 function prepare(version) {
@@ -51,33 +65,117 @@ function prepare(version) {
         log(`${version.name}: production build`);
         execFileSync('vp', ['build'], { cwd: version.dir, env, stdio: 'pipe' });
     }
+    if (version.ssr && (args.rebuild || ssrBundle(version) === undefined)) {
+        log(`${version.name}: SSR build`);
+        execFileSync('vp', ['build', '--ssr'], { cwd: version.dir, env, stdio: 'pipe' });
+    }
+}
+
+const waitFor = async (check, what, stop) => {
+    for (let tries = 0; ; tries++) {
+        if (await check().catch(() => false)) return;
+        if (tries > 80) {
+            stop();
+            throw new Error(what);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+};
+
+// Named as `inertia:start-ssr` looks for it.
+const ssrBundle = (version) => ['bootstrap/ssr/ssr.js', 'bootstrap/ssr/ssr.mjs'].find((path) => existsSync(join(version.dir, path)));
+
+// The SSR bundle always listens on Inertia's default port: the preload moves it to the version's own.
+async function startSsr(version) {
+    const ssr = spawn('node', ['--import', join(here, 'lib/ssr-port.mjs'), ssrBundle(version)], {
+        cwd: version.dir,
+        env: { ...env, GLAB_SSR_PORT: String(version.ssrPort) },
+        stdio: 'ignore',
+    });
+    const url = `http://127.0.0.1:${version.ssrPort}`;
+    await waitFor(async () => (await fetch(`${url}/health`)).ok, `${version.name}: the SSR server did not start on ${url}`, () => ssr.kill());
+    return { url, stop: () => ssr.kill() };
 }
 
 async function serve(version) {
     const url = `http://localhost:${version.port}`;
+    const ssr = version.ssr ? await startSsr(version) : null;
     const server = spawn(php, ['artisan', 'serve', '--host=127.0.0.1', `--port=${version.port}`], {
         cwd: version.dir,
-        env: { ...env, APP_URL: url, PHP_CLI_SERVER_WORKERS: '4' },
+        env: {
+            ...env,
+            APP_URL: url,
+            PHP_CLI_SERVER_WORKERS: '4',
+            INERTIA_SSR_ENABLED: ssr ? 'true' : 'false',
+            ...(ssr && { INERTIA_SSR_URL: ssr.url, INERTIA_SSR_THROW_ON_ERROR: 'true' }),
+        },
         stdio: 'ignore',
     });
-    for (let tries = 0; ; tries++) {
-        if ((await fetch(url).catch(() => null))?.ok) break;
-        if (tries > 80) {
-            server.kill();
-            throw new Error(`${version.name} did not start on ${url} (its code may not run on the migrated database)`);
-        }
-        await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-    return { url, stop: () => server.kill() };
+    const stop = () => {
+        server.kill();
+        ssr?.stop();
+    };
+    await waitFor(async () => (await fetch(url)).ok, `${version.name} did not start on ${url} (its code may not run on the migrated database)`, stop);
+    return { url, stop };
 }
 
-// Collected in the page from the first frame: long tasks and the largest contentful paint.
-function installPerfProbe() {
-    window.__perf = { longTasks: [], lcp: 0 };
+const manifests = new Map();
+
+/**
+ * Throws unless the page comes from the version's own build, and from its SSR server when it renders on the server:
+ * with SSR errors thrown, a page that did not render there would fail rather than fall back to the client.
+ */
+function checkServed(version, html) {
+    if (!manifests.has(version.name)) {
+        manifests.set(version.name, readFileSync(join(version.dir, 'public/build/manifest.json'), 'utf8'));
+    }
+    const asset = html.match(/\/build\/(assets\/app-[^"]+\.js)/)?.[1];
+    if (asset === undefined || !manifests.get(version.name).includes(`"${asset}"`)) {
+        throw new Error(`${version.name}: the page does not load its own build (${asset ?? 'no app bundle'})`);
+    }
+    if (html.includes('data-server-rendered="true"') !== version.ssr) {
+        throw new Error(`${version.name}: the page is ${version.ssr ? 'not ' : ''}server-rendered`);
+    }
+}
+
+const lineSelector = ['rail-previous', 'rail-tail', 'rail-staged-tail', 'commit-reply-spine', 'thread-spine', 'thread-column', 'thread-elbow', 'graph-edge', 'graph-edge-dashed']
+    .map((name) => `[data-test="${name}"]`)
+    .join(',');
+
+// Collected in the page from the first frame: long tasks, the largest contentful paint, and when the first line of the
+// graph reached the DOM, from the server's HTML (a rail piece) or from the client (a rail piece or a canvas line).
+function installPerfProbe(lineSelector) {
+    window.__perf = { longTasks: [], lcp: 0, firstLine: null };
     new PerformanceObserver((list) => window.__perf.longTasks.push(...list.getEntries().map((entry) => entry.duration))).observe({ type: 'longtask', buffered: true });
     new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) window.__perf.lcp = entry.startTime;
     }).observe({ type: 'largest-contentful-paint', buffered: true });
+    const lines = new MutationObserver(() => {
+        if (document.querySelector(lineSelector)) {
+            window.__perf.firstLine = performance.now();
+            lines.disconnect();
+        }
+    });
+    lines.observe(document, { childList: true, subtree: true });
+}
+
+/** What a page load costs, read once it has settled. A line only shows once something paints, hence the max. */
+async function loadMetrics(page, cdp) {
+    return {
+        ...(await metrics(cdp)),
+        ...(await page.evaluate(() => {
+            const [navigation] = performance.getEntriesByType('navigation');
+            const fcp = performance.getEntriesByName('first-contentful-paint')[0]?.startTime ?? 0;
+            return {
+                TTFB: navigation.responseStart,
+                HtmlSize: navigation.decodedBodySize,
+                FCP: fcp,
+                LCP: window.__perf.lcp,
+                FirstLine: window.__perf.firstLine === null ? 0 : Math.max(window.__perf.firstLine, fcp),
+                LongTasks: window.__perf.longTasks.reduce((sum, value) => sum + value, 0),
+            };
+        })),
+    };
 }
 
 const metricNames = ['TaskDuration', 'ScriptDuration', 'LayoutDuration', 'RecalcStyleDuration', 'LayoutCount', 'RecalcStyleCount', 'Nodes', 'JSHeapUsedSize'];
@@ -92,7 +190,7 @@ const delta = (after, before) => Object.fromEntries(Object.keys(after).map((name
 // --reduced-motion measures without animations, to tell their share of the cost from the rest.
 async function openPage(browser, url) {
     const context = await signIn(browser, url, cast.author, { reducedMotion: args['reduced-motion'] ? 'reduce' : 'no-preference' });
-    await context.addInitScript(installPerfProbe);
+    await context.addInitScript(installPerfProbe, lineSelector);
     const page = await context.newPage();
     const cdp = await context.newCDPSession(page);
     await cdp.send('Performance.enable');
@@ -107,23 +205,28 @@ const settle = async (page) => {
 
 const fixture = JSON.parse(readFileSync(join(here, 'fixture.json'), 'utf8'));
 
+async function load(browser, url, version, path) {
+    const { context, page, cdp } = await openPage(browser, url);
+    const response = await page.goto(path);
+    const html = await response.text();
+    checkServed(version, html);
+    await settle(page);
+    const result = {
+        ...(await loadMetrics(page, cdp)),
+        // The elements the server's HTML holds, before any script runs.
+        ServerElements: await page.evaluate((source) => new DOMParser().parseFromString(source, 'text/html').getElementsByTagName('*').length, html),
+    };
+    await context.close();
+    return result;
+}
+
 /** What each run measures, on one version. Every measure returns plain numbers. */
 const measures = {
-    async 'load: feed'(browser, url) {
-        const { context, page, cdp } = await openPage(browser, url);
-        await page.goto('/log/latest');
-        await settle(page);
-        const result = { ...(await metrics(cdp)), ...(await page.evaluate(() => ({ LongTasks: window.__perf.longTasks.reduce((sum, value) => sum + value, 0), LCP: window.__perf.lcp }))) };
-        await context.close();
-        return result;
+    async 'load: feed'(browser, url, version) {
+        return load(browser, url, version, '/log/latest');
     },
-    async 'load: thread'(browser, url) {
-        const { context, page, cdp } = await openPage(browser, url);
-        await page.goto(`/@${cast.author}/commits/${fixture.root}`);
-        await settle(page);
-        const result = { ...(await metrics(cdp)), ...(await page.evaluate(() => ({ LongTasks: window.__perf.longTasks.reduce((sum, value) => sum + value, 0), LCP: window.__perf.lcp }))) };
-        await context.close();
-        return result;
+    async 'load: thread'(browser, url, version) {
+        return load(browser, url, version, `/@${cast.author}/commits/${fixture.root}`);
     },
     async 'scroll: feed'(browser, url) {
         const { context, page, cdp } = await openPage(browser, url);
@@ -209,10 +312,19 @@ const median = (values) => {
     return sorted.length % 2 ? sorted[(sorted.length - 1) / 2] : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2;
 };
 
-const units = { TaskDuration: 'ms', ScriptDuration: 'ms', LayoutDuration: 'ms', RecalcStyleDuration: 'ms', LongTasks: 'ms', LCP: 'ms', FrameP50: 'ms', FrameP95: 'ms', JSHeapUsedSize: 'MB' };
+// How far a side's runs stray from their median: the interquartile range, as a share of the median.
+const spread = (values) => {
+    const sorted = [...values].sort((a, b) => a - b);
+    const at = (share) => sorted[Math.round((sorted.length - 1) * share)];
+    const middle = median(values);
+    return middle === 0 ? 0 : (at(0.75) - at(0.25)) / Math.abs(middle);
+};
+
+const units = { TaskDuration: 'ms', ScriptDuration: 'ms', LayoutDuration: 'ms', RecalcStyleDuration: 'ms', LongTasks: 'ms', LCP: 'ms', FCP: 'ms', TTFB: 'ms', FirstLine: 'ms', FrameP50: 'ms', FrameP95: 'ms', JSHeapUsedSize: 'MB' };
 const shown = (name, value) => {
     if (['TaskDuration', 'ScriptDuration', 'LayoutDuration', 'RecalcStyleDuration'].includes(name)) return `${(value * 1000).toFixed(0)} ms`;
     if (name === 'JSHeapUsedSize') return `${(value / 1048576).toFixed(1)} MB`;
+    if (name === 'HtmlSize') return `${(value / 1024).toFixed(0)} KB`;
     if (units[name] === 'ms') return `${value.toFixed(0)} ms`;
     return value.toFixed(0);
 };
@@ -229,10 +341,10 @@ try {
 
     for (const [name, measure] of Object.entries(measures)) {
         // A warm-up run on each side, then runs alternating, so caches and drift weigh on both alike.
-        for (const [index] of versions.entries()) await measure(browser, servers[index].url);
+        for (const [index, version] of versions.entries()) await measure(browser, servers[index].url, version);
         for (let run = 0; run < runs; run++) {
             for (const [index, version] of (run % 2 ? [...versions.entries()].reverse() : [...versions.entries()])) {
-                results[name][version.name].push(await measure(browser, servers[index].url));
+                results[name][version.name].push(await measure(browser, servers[index].url, version));
             }
         }
         process.stdout.write(`\x1b[2m${name} measured\x1b[0m\n`);
@@ -248,7 +360,14 @@ for (const [name, { before, after }] of Object.entries(results)) {
     for (const metric of Object.keys(before[0])) {
         const b = median(before.map((run) => run[metric]));
         const a = median(after.map((run) => run[metric]));
-        rows.push({ measure: name, metric, before: b, after: a, change: b === 0 ? (a === 0 ? 0 : Infinity) : (a - b) / b });
+        rows.push({
+            measure: name,
+            metric,
+            before: b,
+            after: a,
+            change: b === 0 ? (a === 0 ? 0 : Infinity) : (a - b) / b,
+            spread: Math.max(spread(before.map((run) => run[metric])), spread(after.map((run) => run[metric]))),
+        });
     }
 }
 
@@ -265,9 +384,11 @@ const markdown = [
     `- after: ${versions[1].label}`,
     `- production builds, CPU slowed ${throttle}x, median of ${runs} runs (after one warm-up run each)${args['reduced-motion'] ? ', reduced motion' : ''}`,
     '',
-    '| Measure | Metric | Before | After | Change |',
-    '|---|---|---:|---:|---:|',
-    ...rows.map((row) => `| ${row.measure} | ${row.metric} | ${shown(row.metric, row.before)} | ${shown(row.metric, row.after)} | ${changeText(row)} |`),
+    `- spread: the larger interquartile range of the two sides, as a share of the median; a change within it is noise`,
+    '',
+    '| Measure | Metric | Before | After | Change | Spread |',
+    '|---|---|---:|---:|---:|---:|',
+    ...rows.map((row) => `| ${row.measure} | ${row.metric} | ${shown(row.metric, row.before)} | ${shown(row.metric, row.after)} | ${changeText(row)} | ${(row.spread * 100).toFixed(0)}% |`),
     '',
 ].join('\n');
 writeFileSync(join(outDir, 'report.md'), markdown);
