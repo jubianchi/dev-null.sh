@@ -285,6 +285,10 @@ export function installProbe() {
             for (const { circle, element } of matched) {
                 if (!element) issues.push(`cut-out at ${Math.round(circle.x)},${Math.round(circle.y)} (r${circle.r}) matches no node: stale position or radius`);
             }
+            // A card that content-visibility skips, far off screen, keeps a placeholder height while what the canvas
+            // measures inside it is laid out at its real one: the two disagree until the card nears the viewport, takes
+            // its real height and is measured again, before it shows. Lines to such nodes are left out of the geometry.
+            const provisional = new Set(matched.filter(({ element }) => element && !element.checkVisibility({ contentVisibilityAuto: true })).map(({ circle }) => circle));
 
             for (const { element: node, isStrict } of expectedNodes(container)) {
                 const centre = centreOf(node, box);
@@ -348,9 +352,12 @@ export function installProbe() {
                 const startsOnTrunk = sampled.some((other) => other !== edge && inStroke(other.path, new DOMPoint(edge.start.x, edge.start.y)));
                 if (!startCircle && !startsOnTrunk) issues.push(`line ${d} starts at ${Math.round(edge.start.x)},${Math.round(edge.start.y)}, on no node or line: gap`);
 
-                const crossed = circles.filter(
-                    (c) => c !== endCircle && c !== startCircle && edge.points.some((point) => Math.hypot(point.x - c.x, point.y - c.y) < c.r - 1),
-                );
+                edge.isProvisional = provisional.has(endCircle) || provisional.has(startCircle);
+                const crossed = edge.isProvisional
+                    ? []
+                    : circles.filter(
+                          (c) => c !== endCircle && c !== startCircle && !provisional.has(c) && edge.points.some((point) => Math.hypot(point.x - c.x, point.y - c.y) < c.r - 1),
+                      );
                 for (const c of crossed) issues.push(`line ${d} runs through the node at ${Math.round(c.x)},${Math.round(c.y)}`);
             }
 
@@ -360,6 +367,7 @@ export function installProbe() {
                 for (let j = i + 1; j < sampled.length; j++) {
                     const a = sampled[i];
                     const b = sampled[j];
+                    if (a.isProvisional || b.isProvisional) continue;
                     const junctions = [
                         b.path.isPointInStroke(new DOMPoint(a.start.x, a.start.y)) && a.start,
                         a.path.isPointInStroke(new DOMPoint(b.start.x, b.start.y)) && b.start,
