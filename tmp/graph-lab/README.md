@@ -146,7 +146,10 @@ its own (13801, 13802): the bundle always listens on 13714, which `lib/ssr-port.
 server points at its own SSR server with SSR errors thrown, and every page load checks it was served by its version's
 build and, with SSR, rendered on the server. Loads then also report TTFB, HTML size, FCP, the elements in the server's
 HTML (`ServerElements`) and when the first line of the graph shows (`FirstLine`: a rail piece from the server or a line
-from the client, once painted). The `Spread` column is the larger interquartile range of the two sides as a share of
+from the client, once painted) and `ReplacedCards`, the server's cards the client threw away (0 once it hydrates).
+Every page is opened as a returning reader, whose `time_zone` and `hour_cycle` cookies (read from Chrome on a blank
+page) let the server render times as the browser shows them, so the page can hydrate; `--first-visit` leaves them
+out. The `Spread` column is the larger interquartile range of the two sides as a share of
 the median: a change within it is noise.
 
 Results go to `tmp/graph-lab/perf/<date>/` (`report.md`, `results.json`). `--keep` keeps the worktrees and their builds

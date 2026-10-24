@@ -2,7 +2,7 @@
 // Rendering performance, before and after: builds two refs for production in throwaway worktrees, serves them side by
 // side on the same database, and measures the same pages and interactions on each, alternating, with the CPU slowed.
 // Usage: node tmp/graph-lab/perf.mjs [--before=<ref>] [--after=<ref>] [--runs=5] [--throttle=4] [--keep] [--rebuild]
-//        [--reduced-motion] [--ssr[=both|before|after]]
+//        [--reduced-motion] [--ssr[=both|before|after]] [--first-visit]
 //
 // --ssr serves the versions as production does: each one renders on its own SSR server, which loads also measure (time
 // to first byte, HTML size, first lines of the graph). Comparing a ref with itself (--before=X --after=X) tells the
@@ -145,7 +145,15 @@ const lineSelector = ['rail-previous', 'rail-tail', 'rail-staged-tail', 'commit-
 // Collected in the page from the first frame: long tasks, the largest contentful paint, and when the first line of the
 // graph reached the DOM, from the server's HTML (a rail piece) or from the client (a rail piece or a canvas line).
 function installPerfProbe(lineSelector) {
-    window.__perf = { longTasks: [], lcp: 0, firstLine: null };
+    window.__perf = { longTasks: [], lcp: 0, firstLine: null, replacedCards: 0 };
+    // Hydration keeps the server's cards; rendering afresh throws them away for new ones.
+    new MutationObserver((records) => {
+        for (const record of records) {
+            for (const node of record.removedNodes) {
+                if (node.nodeType === 1 && (node.matches('[data-test="commit"]') || node.querySelector('[data-test="commit"]'))) window.__perf.replacedCards++;
+            }
+        }
+    }).observe(document, { childList: true, subtree: true });
     new PerformanceObserver((list) => window.__perf.longTasks.push(...list.getEntries().map((entry) => entry.duration))).observe({ type: 'longtask', buffered: true });
     new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) window.__perf.lcp = entry.startTime;
@@ -173,6 +181,7 @@ async function loadMetrics(page, cdp) {
                 LCP: window.__perf.lcp,
                 FirstLine: window.__perf.firstLine === null ? 0 : Math.max(window.__perf.firstLine, fcp),
                 LongTasks: window.__perf.longTasks.reduce((sum, value) => sum + value, 0),
+                ReplacedCards: window.__perf.replacedCards,
             };
         })),
     };
@@ -192,6 +201,18 @@ async function openPage(browser, url) {
     const context = await signIn(browser, url, cast.author, { reducedMotion: args['reduced-motion'] ? 'reduce' : 'no-preference' });
     await context.addInitScript(installPerfProbe, lineSelector);
     const page = await context.newPage();
+    // A returning reader: their browser has told the server its clock, so a server-rendered page hydrates. Read on a
+    // blank page, which loads nothing the measured page could then find in its cache.
+    if (!args['first-visit']) {
+        const clock = await page.evaluate(() => {
+            const { timeZone, hourCycle } = new Intl.DateTimeFormat(undefined, { hour: 'numeric' }).resolvedOptions();
+            return { timeZone, hourCycle: hourCycle ?? 'h23' };
+        });
+        await context.addCookies([
+            { name: 'time_zone', value: clock.timeZone, url },
+            { name: 'hour_cycle', value: clock.hourCycle, url },
+        ]);
+    }
     const cdp = await context.newCDPSession(page);
     await cdp.send('Performance.enable');
     await cdp.send('Emulation.setCPUThrottlingRate', { rate: throttle });
@@ -382,7 +403,7 @@ const markdown = [
     '',
     `- before: ${versions[0].label}`,
     `- after: ${versions[1].label}`,
-    `- production builds, CPU slowed ${throttle}x, median of ${runs} runs (after one warm-up run each)${args['reduced-motion'] ? ', reduced motion' : ''}`,
+    `- production builds, CPU slowed ${throttle}x, median of ${runs} runs (after one warm-up run each)${args['reduced-motion'] ? ', reduced motion' : ''}${args['first-visit'] ? ', first visits (no clock cookies)' : ''}`,
     '',
     `- spread: the larger interquartile range of the two sides, as a share of the median; a change within it is noise`,
     '',
