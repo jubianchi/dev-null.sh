@@ -39,6 +39,14 @@ export function installProbe() {
         return style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity) > 0;
     };
 
+    // Whether a rail piece shows. An SVG one, like an elbow, has no offset size, and keeps its own display under an
+    // ancestor hidden with display: none, which is how a canvas hides its rail once it draws: checkVisibility looks at
+    // the ancestors too.
+    const isRailShown = (element) => {
+        const rect = element.getBoundingClientRect();
+        return (rect.width > 0 || rect.height > 0) && element.checkVisibility({ visibilityProperty: true });
+    };
+
     const isRound = (element) => {
         if (element.offsetWidth < 4) return false;
         const radius = parseFloat(getComputedStyle(element).borderTopLeftRadius);
@@ -278,7 +286,7 @@ export function installProbe() {
                 issues.push(`canvas ${Math.round(size.width)}x${Math.round(size.height)} at ${Math.round(size.left - box.left)},${Math.round(size.top - box.top)} ≠ container ${Math.round(box.width)}x${Math.round(box.height)}`);
             }
 
-            const leftovers = [...container.querySelectorAll(railPieces)].filter(isVisible);
+            const leftovers = [...container.querySelectorAll(railPieces)].filter(isRailShown);
             if (leftovers.length > 0) issues.push(`${leftovers.length} old rail piece(s) still shown (${[...new Set(leftovers.map((element) => element.dataset.test))].join(', ')})`);
 
             const matched = matchCircles(container, svg, box, circles);
@@ -683,7 +691,7 @@ export function installProbe() {
         const startedAt = performance.now();
         const tick = () => {
             const cards = document.querySelectorAll('[data-test="commit"]').length;
-            const pieces = [...document.querySelectorAll(railPieces)].filter(isVisible).length;
+            const pieces = [...document.querySelectorAll(railPieces)].filter(isRailShown).length;
             const lines = document.querySelectorAll('[data-test="graph-canvas"] > g path').length;
             // Where the cards sit, to tell whether the hand-over moves anything.
             const layout = [...document.querySelectorAll('[data-test="commit"]')]
